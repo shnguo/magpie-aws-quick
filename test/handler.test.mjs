@@ -2,7 +2,8 @@ import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { startFakeQuick, defaultScript } from './helpers/fake-quick.mjs'
 import { PLAIN_TEXT_NOTE, TOOLS_STILL_APPLY, handleChatCompletions, handleModels } from '../lib/handler.mjs'
-import { createSessionStore } from '../lib/sessions.mjs'
+import { createSessionStore, chainHashes, sessionScope } from '../lib/sessions.mjs'
+import { normalizeTools } from '../lib/tools.mjs'
 import { byteLen, frameBytes, UPSTREAM_TEXT_LIMIT } from '../lib/translate.mjs'
 import { OutpostError } from '../lib/outpost.mjs'
 
@@ -258,7 +259,10 @@ test('fresh and retried Quick threads preserve the complete user turn and plan f
     assert.equal(f.state.userMessages.length, 3)
     assert.equal(fresh.threadId, continuation.threadId)
     assert.notEqual(retried.threadId, fresh.threadId)
-    assert.match(continuation.payload.text, /Client tool calling — reminder/)
+    assert.ok(continuation.payload.text.includes(tools[0].description), 'the continuing thread should receive previously clipped descriptions')
+    assert.ok((continuation.payload.text.match(/^\- tool_/gm) ?? []).length < tools.length - 1)
+    assert.ok(continuation.payload.text.endsWith(user.content))
+    assert.ok(frameBytes(continuation.threadId, continuation.payload) <= UPSTREAM_TEXT_LIMIT)
     for (const { threadId, payload } of [fresh, retried]) {
       assert.ok(payload.text.endsWith('\n\n' + user.content))
       assert.ok(frameBytes(threadId, payload) <= UPSTREAM_TEXT_LIMIT)
@@ -295,7 +299,7 @@ test('a changed parameter on the same tool name sends the new schema on a fresh 
   assert.match(current.payload.text, /"required":\["new_key"\]/)
 })
 
-test('an opening turn with no room for tools resends the schema on the next turn', async () => {
+test('an oversized optional-tool turn keeps a call format and retries missing schemas on the next turn', async () => {
   const sessions = createSessionStore()
   const tools = [{ name: 'lookup', parameters: {
     type: 'object', properties: { query: { type: 'string' } }, required: ['query'],
@@ -309,8 +313,102 @@ test('an opening turn with no room for tools resends the schema on the next turn
   const [opening, followup] = fake.state.userMessages.slice(-2)
   assert.equal(opening.threadId, followup.threadId)
   assert.ok(opening.payload.text.endsWith('Keep this final question?'))
-  assert.doesNotMatch(opening.payload.text, /- lookup/)
+  assert.match(opening.payload.text, /<tool_call>/)
+  assert.match(opening.payload.text, /- lookup/)
+  assert.doesNotMatch(opening.payload.text, /"required":\["query"\]/)
   assert.match(followup.payload.text, /"required":\["query"\]/)
+})
+
+test('descriptions and per-turn choices reuse the thread and refresh just the affected tools', async () => {
+  const f = await startFakeQuick({ script: payload => payload.text.includes('requires the client tool "pick"')
+    ? [{ type: 'text_delta', payload: { delta: '<tool_call>{"name":"pick","arguments":{"key":"ok"}}</tool_call>' } },
+      { type: 'message_complete', payload: {} }] : defaultScript(payload) })
+  const sessions = createSessionStore(), outpostMgr = fakeMgr(f), history = []
+  const pick = { name: 'pick', description: 'Pick a value', parameters: { type: 'object', properties: { key: { type: 'string' } }, required: ['key'] } }
+  const search = { name: 'search', description: 'Search agent A', parameters: { type: 'object', properties: {} } }
+  const send = async (tools, choice) => {
+    history.push({ role: 'user', content: 'Next step ' + history.length })
+    const res = await handleChatCompletions({ body: { model: 'smart', messages: history, tools, tool_choice: choice }, outpostMgr, sessions })
+    assert.equal(res.status, 200)
+    const reply = (await res.json()).choices[0].message
+    history.push(reply)
+    for (const c of reply.tool_calls ?? []) history.push({ role: 'tool', tool_call_id: c.id, content: 'ok' })
+    return f.state.userMessages.at(-1).payload
+  }
+  try {
+    const forced = { type: 'function', function: { name: 'pick' } }
+    const restricted = await send([pick, search], forced)
+    assert.match(restricted.text, /- pick/)
+    assert.doesNotMatch(restricted.text, /- search/)
+    const expanded = await send([pick, search], 'auto')
+    assert.match(expanded.text, /- search: Search agent A/)
+    const changed = { ...search, description: 'Search agent B' }
+    const refresh = await send([changed, pick], 'auto')
+    assert.match(refresh.text, /- search: Search agent B/)
+    assert.doesNotMatch(refresh.text, /- pick/)
+    const same = await send([pick, changed], 'auto')
+    assert.match(same.text, /reminder/)
+    const disabled = await send([pick, changed], 'none')
+    assert.doesNotMatch(disabled.text, /<tool_call>/)
+    assert.match(disabled.custom_prompt, /without calling client tools/)
+    const required = await send([changed, pick], forced)
+    assert.match(required.text, /requires the client tool "pick"/)
+    assert.match(required.text, /key: string/)
+    assert.equal(new Set(f.state.userMessages.map(m => m.threadId)).size, 1)
+  } finally {
+    await f.close()
+  }
+})
+
+test('a required tool fits with the complete question or returns 413 before sending a Quick turn', async () => {
+  const tools = [{ name: 'pick', description: 'Pick', parameters: {
+    type: 'object', properties: { key: { type: 'string', maxLength: 60 } }, required: ['key'],
+  } }]
+  const f = await startFakeQuick({ script: () => [
+    { type: 'text_delta', payload: { delta: '<tool_call>{"name":"pick","arguments":{"key":"ok"}}</tool_call>' } },
+    { type: 'message_complete', payload: {} },
+  ] })
+  const outpostMgr = fakeMgr(f), sessions = createSessionStore()
+  const system = { role: 'system', content: 's'.repeat(16 * 1024) }
+  const q = { role: 'user', content: 'q'.repeat(38 * 1024) + ' exact tail?' }
+  const choice = { type: 'function', function: { name: 'pick' } }
+  const send = (messages, stream = false) => handleChatCompletions({
+    body: { messages, tools, tool_choice: choice, stream }, sessions, outpostMgr,
+  })
+  try {
+    const first = await send([system, q])
+    assert.equal(first.status, 200)
+    const reply = (await first.json()).choices[0].message
+    const opening = f.state.userMessages[0]
+    assert.ok(opening.payload.text.endsWith(q.content))
+    assert.match(opening.payload.text, /maxLength/)
+    const history = [system, q, reply]
+    for (const stream of [false, true]) {
+      const fail = await send([...history, { role: 'user', content: 'x'.repeat(50 * 1024) }], stream)
+      assert.equal(fail.status, 413)
+      assert.match((await fail.json()).error.message, /full current user message and the required client tool/)
+      assert.equal(f.state.userMessages.length, 1)
+    }
+    await (await send([...history, { role: 'user', content: 'Retry' }])).json()
+    assert.equal(f.state.userMessages[1].threadId, opening.threadId)
+  } finally {
+    await f.close()
+  }
+})
+
+test('resuming a thread saved with the old tool scope refreshes its definitions', async () => {
+  const sessions = createSessionStore()
+  const tools = [{ name: 'pick', description: 'Pick', parameters: { type: 'object', properties: { n: { type: 'number' } } } }]
+  const messages = [{ role: 'user', content: 'begin' }, { role: 'assistant', content: 'old reply' }]
+  const previous = sessionScope('test-acct', 'smart|', '', [normalizeTools(tools), 'auto'])
+  const threadId = crypto.randomUUID()
+  sessions.set(chainHashes(previous, messages).at(-1), { threadId })
+  const r = await req({ messages: [...messages, { role: 'user', content: 'continue' }], tools }, { sessions })
+  assert.equal(r.status, 200)
+  await r.json()
+  const frame = fake.state.userMessages.at(-1)
+  assert.equal(frame.threadId, threadId)
+  assert.match(frame.payload.text, /"n":\{"type":"number"\}/)
 })
 
 test('edited history starts a fresh thread', async () => {

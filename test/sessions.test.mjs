@@ -107,7 +107,8 @@ test('store persists to disk and a fresh instance resumes entries', async () => 
   const file = path.join(dir, 'thread-sessions.json')
   try {
     const s1 = createSessionStore({ file, ttlMs: 60_000 })
-    s1.set('k1', { threadId: 'thread-abc', needsToolSpecs: true })
+    const receipt = { ['a'.repeat(64)]: { hash: 'b'.repeat(64), level: 2, chars: 96 } }
+    s1.set('k1', { threadId: 'thread-abc', needsToolSpecs: true, toolCoverage: receipt })
     s1.set('k2', { threadId: 'thread-def' })
     // persist is debounced — wait for the write
     await new Promise((r) => setTimeout(r, 400))
@@ -115,6 +116,7 @@ test('store persists to disk and a fresh instance resumes entries', async () => 
     const first = s2.take('k1')
     assert.equal(first?.threadId, 'thread-abc')
     assert.equal(first?.needsToolSpecs, true)
+    assert.deepEqual(first?.toolCoverage, receipt)
     assert.equal(s2.take('k2')?.threadId, 'thread-def')
     assert.equal(s2.size, 0) // take() claims are persisted too
     await new Promise((r) => setTimeout(r, 400))

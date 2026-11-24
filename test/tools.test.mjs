@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { normalizeTools, buildToolPreamble, createToolCallParser, slimSchema } from '../lib/tools.mjs'
+import { normalizeTools, buildToolPreamble, createToolCatalog, createToolCallParser, slimSchema } from '../lib/tools.mjs'
 import { escapedBytes } from '../lib/translate.mjs'
 
 test('normalizeTools keeps only named function tools', () => {
@@ -100,6 +100,83 @@ test('parser extracts blocks split across deltas', () => {
   const end = p.end()
   assert.equal(end.text, '')
   assert.equal(end.dropped, undefined)
+})
+
+test('tool descriptions, outlines and omitted validation detail can improve on a later turn', () => {
+  const tools = normalizeTools([{ name: 'report', description: 'Usage notes. '.repeat(500),
+    input_schema: { type: 'object', required: ['findings'], properties: {
+      findings: { type: 'array', minItems: 1, items: { type: 'object', required: ['summary'], properties: {
+        summary: { type: 'string', maxLength: 60, pattern: '^[A-Z]' },
+      } } },
+    } } }])
+  const clipped = {}
+  const short = buildToolPreamble(tools, 'auto', { maxBytes: 3500, stats: clipped })
+  assert.match(short, /\[truncated\]/)
+  assert.equal(clipped.needsToolSpecs, true)
+  const repeated = {}
+  const reminder = buildToolPreamble(tools, 'auto', { maxBytes: 3500, previous: clipped.toolCoverage, stats: repeated })
+  assert.match(reminder, /reminder/)
+  assert.equal(repeated.needsToolSpecs, true)
+  const complete = {}
+  const upgraded = buildToolPreamble(tools, 'auto', { previous: repeated.toolCoverage, stats: complete })
+  assert.ok(upgraded.includes(tools[0].description))
+  assert.equal(complete.needsToolSpecs, false)
+  const tight = {}
+  const outline = buildToolPreamble(tools, 'required', { maxBytes: 500, stats: tight })
+  assert.match(outline, /outline:/)
+  for (const rule of ['"minItems":1', '"maxLength":60', '"pattern":"^[A-Z]"']) assert.ok(outline.includes(rule))
+  assert.equal(tight.needsToolSpecs, true)
+})
+
+test('a fixed per-turn budget can finish clipped descriptions over multiple turns', () => {
+  const tools = normalizeTools(['a', 'b', 'c', 'd'].map(name => ({
+    name, description: name.repeat(1600), input_schema: { type: 'object', properties: {} },
+  })))
+  let stats = {}
+  const first = buildToolPreamble(tools, 'auto', { maxBytes: 3200, stats })
+  assert.match(first, /\[truncated\]/)
+  assert.equal(stats.needsToolSpecs, true)
+  const received = new Set()
+  for (let i = 0; i < tools.length; i++) {
+    const previous = stats.toolCoverage
+    stats = {}
+    const update = buildToolPreamble(tools, 'auto', { maxBytes: 3200, previous, stats })
+    assert.ok(escapedBytes(update) <= 3200)
+    for (const tool of tools) if (update.includes(tool.description)) received.add(tool.name)
+    if (!stats.needsToolSpecs) break
+  }
+  assert.equal(received.size, tools.length)
+  assert.equal(stats.needsToolSpecs, false)
+})
+
+test('tool scope is stable across key order, top-level descriptions and choice but tracks constraints', () => {
+  const a = { name: 'report', description: 'first', parameters: { type: 'string', maxLength: 60 } }
+  const b = { name: 'report', description: 'updated', parameters: { maxLength: 60, type: 'string' } }
+  const catalog = createToolCatalog([a, { name: 'empty' }], 'auto')
+  assert.deepEqual(catalog.contracts, createToolCatalog([{ name: 'empty' }, b], { type: 'function', function: { name: 'report' } }).contracts)
+  assert.notDeepEqual(catalog.contracts, createToolCatalog([{ name: 'empty' }, { ...b, parameters: { type: 'string', maxLength: 61 } }], 'auto').contracts)
+})
+
+test('streaming preserves Markdown examples and literal tags while extracting the real call', () => {
+  const call = '<tool_call>{"name":"Read","arguments":{"q":"` </tool_call> and <tool_call>"}}</tool_call>'
+  const prose = [
+    'The review ends with `<tool_call>` in prose, followed by the missing finding.',
+    'An example is ``' + call + '``.',
+    '~~~xml', call, '~~~',
+    '```xml', call, '```',
+    'Escaped \\<tool_call> and bare <tool_call> both name the markup.',
+    'Next action: ',
+  ].join('\n')
+  const input = prose + call + ' Done.'
+  for (const size of [1, 2, 3, 9, 32, input.length]) {
+    const parser = createToolCallParser()
+    const pieces = []
+    for (let i = 0; i < input.length; i += size) pieces.push(parser.push(input.slice(i, i + size)).text)
+    const tail = parser.end()
+    assert.equal(pieces.join('') + tail.text, prose + ' Done.')
+    assert.deepEqual(parser.calls, [{ name: 'Read', arguments: { q: '` </tool_call> and <tool_call>' } }])
+    assert.equal(tail.dropped, undefined)
+  }
 })
 
 test('parser handles multiple blocks and surrounding text', () => {

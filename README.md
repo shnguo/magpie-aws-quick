@@ -91,9 +91,10 @@ continuations through three tiers, most precise first:
 Tier order matters: verified content matches always win; the session key
 is only used when both content tiers fail.
 - **Scope isolation** — the chain is namespaced by
-  `H(account, agent_mode, thinking_effort, system prompt, tool definitions and choice)`:
-  switching accounts, models, effort, system prompt, or the toolset
-  starts a fresh thread rather than resuming a stale one.
+  `H(account, agent_mode, thinking_effort, system prompt, tool names and slimmed parameter schemas)`:
+  changes to these inputs start a fresh thread. Updated tool descriptions and
+  per-turn choices reuse the thread. A named choice advertises only that tool
+  for the current turn.
 - **Edit & branch detection** — any change to earlier messages alters the
   hashes, so edited or branched history can never silently continue a
   thread that doesn't match; only append-only tails qualify. Cached
@@ -102,7 +103,7 @@ is only used when both content tiers fail.
 - **Bounded memory** — entries expire after 24h idle (agent sessions pause
   far longer than that between turns) and the store is LRU-capped at 200
   threads. The cache persists to `thread-sessions.json` (hashes + thread
-  ids and a flag for incomplete tool definitions) so reuse survives plugin reloads; a stale hit is
+  ids and tool coverage hashes, levels and lengths) so reuse survives plugin reloads; a stale hit is
   safe — the handler retries once on a fresh thread with the full
   transcript.
 
@@ -219,15 +220,13 @@ A few plugin options tune request handling (`magpie plugin options aws-quick '{�
   and `message_complete.tool_calls` is always empty. OpenAI `tools` sent by
   the client are injected as a `<tool_call>{json}</tool_call>` text convention
   and parsed back into standard `tool_calls`; `tool`-role results render as
-  `[tool_result …]` continuing the same thread. Quick keeps tool definitions in thread history. Later turns carry a short
-  reminder once the thread has received the parameter schemas or complete
-  outlines. If a turn could fit only partial outlines or names, the adapter
-  sends the definitions again on the next turn. Reliability depends on the
-  model honoring the convention — verified stable under
-  `tool_choice:'required'` for smart/advanced; occasionally the model answers
-  directly with its own tools (e.g. web search) instead, which shows up as a
-  plain-text reply. If the model instead invokes a client-declared tool
-  through Quick's own native tool channel, the plugin recognizes the call and
+  `[tool_result …]` continuing the same thread. Quick keeps tool definitions in thread history.
+  The adapter tracks which descriptions and schemas have reached Quick. A later
+  turn sends missing details or changed descriptions when space permits. A short
+  reminder suffices while the available space would repeat the same material.
+  Inline and fenced Markdown examples of tool calls pass through as text.
+  A required choice produces an error if Quick completes without the requested
+  client call. If Quick invokes a client-declared tool through Quick's own native tool channel, the plugin recognizes the call and
   emits it as a normal `tool_calls` item, stopping the turn before Quick can
   rewrite it as text. Quick's built-in tool results are never mapped to OpenAI
   `tool_calls` (that's its internal process).
@@ -258,8 +257,11 @@ A few plugin options tune request handling (`magpie plugin options aws-quick '{�
   server-side (text, instructions and attachments share it). The adapter measures the serialized frame and reserves space for the current
   user message before adding the tool catalog. It shortens tool descriptions
   first, then converts schemas to typed outlines that retain nested fields,
-  required flags, enum values and conditional requirements. Earlier history
-  and tool results share the remaining space. Ordinary chat keeps full system
+  required flags, enum values and validation constraints. Even a very large
+  optional-tool turn reserves space for the call format and a tool name.
+  A required choice reserves a callable argument outline and the full current
+  question. If they cannot fit together, the adapter returns HTTP 413 before
+  sending that turn. Earlier history and tool results share the remaining space. Ordinary chat keeps full system
   instructions when they fit alongside the encoded turn. Claude Code Auto permission reviews require the complete policy
   and transcript in one frame. An oversized review returns HTTP 413 before
   contacting Quick. In Claude Code, Manual mode lets you approve tool requests.
