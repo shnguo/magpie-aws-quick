@@ -2,8 +2,9 @@ import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { startFakeQuick, defaultScript } from './helpers/fake-quick.mjs'
 import { PLAIN_TEXT_NOTE, TOOLS_STILL_APPLY, INVALID_CALL_TOOL, handleChatCompletions, handleModels } from '../lib/handler.mjs'
-import { createSessionStore } from '../lib/sessions.mjs'
-import { byteLen, frameBytes, UPSTREAM_TEXT_LIMIT } from '../lib/translate.mjs'
+import { createSessionStore, chainHashes, sessionScope } from '../lib/sessions.mjs'
+import { normalizeTools } from '../lib/tools.mjs'
+import { byteLen, escapedBytes, frameBytes, UPSTREAM_TEXT_LIMIT } from '../lib/translate.mjs'
 import { OutpostError } from '../lib/outpost.mjs'
 
 let fake
@@ -226,6 +227,280 @@ test('thread reuse: extended conversation continues the same thread with delta o
   assert.equal(t2.threadId, t1.threadId, 'second turn must reuse the Quick thread')
   assert.equal(t2.payload.text, 'what color?')
   assert.ok(!t2.payload.text.includes('remember teal'))
+})
+
+test('fresh and retried Quick threads preserve the complete user turn and plan fields', async () => {
+  const system = { role: 'system', content: 's'.repeat(36 * 1024) }
+  const user = { role: 'user', content: 'line 🪴 "quoted"\n'.repeat(660) + 'Which file should I open first?' }
+  const plan = {
+    name: 'update_plan',
+    parameters: { type: 'object', properties: {
+      items: { type: 'array', items: { type: 'object', properties: {
+        content: { type: 'string' }, status: { type: 'string', enum: ['pending', 'in_progress', 'completed'] },
+      }, required: ['content', 'status'] } },
+      scope: { type: 'string', enum: ['first_task', 'continuation', 'new_task'],
+        description: 'Required with items. Omit on advance.' },
+      advance: { type: 'boolean' },
+    } },
+  }
+  const tools = Array.from({ length: 32 }, (_, i) => ({
+    name: 'tool_' + i, description: 'Long tool description. '.repeat(120),
+    parameters: { type: 'object', properties: Object.fromEntries(Array.from({ length: 9 }, (_, j) =>
+      ['field_' + j, { type: 'string' }])) },
+  })).concat(plan)
+  let count = 0
+  const f = await startFakeQuick({ script: payload => ++count === 2
+    ? [{ type: 'error', payload: { message: 'thread expired' } }] : defaultScript(payload) })
+  const mgr = fakeMgr(f)
+  const sessions = createSessionStore()
+  const send = async messages => {
+    const res = await handleChatCompletions({ body: { model: 'smart', messages, tools }, outpostMgr: mgr, sessions,
+      options: { identity: 'plan-budget' } })
+    assert.equal(res.status, 200)
+    return (await res.json()).choices[0].message
+  }
+  try {
+    const reply = await send([system, user])
+    const retriedReply = await send([system, user, reply, user])
+    assert.equal((retriedReply.content.match(/> Magpie /g) ?? []).length, 1)
+    const [fresh, continuation, retried] = f.state.userMessages
+    assert.equal(f.state.userMessages.length, 3)
+    assert.equal(fresh.threadId, continuation.threadId)
+    assert.notEqual(retried.threadId, fresh.threadId)
+    const catalog = continuation.payload.text.slice(0, -('\n\n' + user.content).length)
+    assert.ok(escapedBytes(catalog) <= 8 * 1024)
+    assert.match(catalog, /\n  (?:parameters|description continued):/)
+    assert.ok(continuation.payload.text.endsWith(user.content))
+    assert.ok(frameBytes(continuation.threadId, continuation.payload) <= UPSTREAM_TEXT_LIMIT)
+    for (const { threadId, payload } of [fresh, retried]) {
+      assert.ok(payload.text.endsWith('\n\n' + user.content))
+      assert.ok(frameBytes(threadId, payload) <= UPSTREAM_TEXT_LIMIT)
+      const spec = payload.text.split('\n- update_plan')[1].split('\n\n')[0]
+      assert.match(spec, /Required with items\. Omit on advance\./)
+      if (spec.includes('  parameters: ')) {
+        const { properties } = JSON.parse(spec.split('  parameters: ')[1])
+        assert.deepEqual(properties.items.items.required, ['content', 'status'])
+        assert.equal(properties.items.items.properties.content.type, 'string')
+        assert.deepEqual(properties.items.items.properties.status.enum, ['pending', 'in_progress', 'completed'])
+        assert.deepEqual(properties.scope.enum, ['first_task', 'continuation', 'new_task'])
+      } else {
+        assert.match(spec, /items\?: Array<\{content: string, status: "pending"\|"in_progress"\|"completed"/)
+        assert.match(spec, /scope\?: "first_task"\|"continuation"\|"new_task"/)
+      }
+    }
+  } finally {
+    await f.close()
+  }
+})
+
+test('streaming and JSON return one catalog notice, preserve tool calls, and reuse the echoed reply', async () => {
+  const answer = 'The fourth finding is included.'
+  const toolCall = '<tool_call>{"name":"inspect","arguments":{"field_0":"ok"}}</tool_call>'
+  const f = await startFakeQuick({ script: p => [
+    { type: 'text_delta', payload: { delta: p.text.endsWith('continue') ? 'Ready' : answer + toolCall } },
+    { type: 'message_complete', payload: {} },
+  ] })
+  const properties = Object.fromEntries(Array.from({ length: 260 }, (_, i) => ['field_' + i, { type: 'string' }]))
+  const tools = [{ name: 'inspect', description: 'Directions. '.repeat(900), parameters: { type: 'object', properties, required: ['field_0'] } }]
+  const mgr = fakeMgr(f)
+  try {
+    for (const stream of [true, false]) {
+      const sessions = createSessionStore()
+      const user = { role: 'user', content: 'Q'.repeat(52 * 1024) }
+      const res = await handleChatCompletions({ body: { messages: [user], tools, stream }, outpostMgr: mgr, sessions })
+      assert.equal(res.status, 200)
+      let message, finish
+      if (stream) {
+        const events = await readSse(res)
+        assert.equal(events.at(-1).done, true)
+        const choices = events.flatMap(e => e.choices ?? [])
+        message = { role: 'assistant', content: choices.map(c => c.delta.content ?? '').join(''),
+          tool_calls: choices.flatMap(c => c.delta.tool_calls ?? []) }
+        finish = choices.at(-1).finish_reason
+      } else {
+        const [choice] = (await res.json()).choices
+        message = choice.message
+        finish = choice.finish_reason
+      }
+      assert.equal(message.content, answer + '\n\n> Magpie shortened 1 tool description and sent 1 parameter schema as an outline to fit this Quick request.')
+      assert.equal(finish, 'tool_calls')
+      assert.equal(message.tool_calls.length, 1)
+      const [call] = message.tool_calls
+      assert.equal(call.function.name, 'inspect')
+      assert.deepEqual(JSON.parse(call.function.arguments), { field_0: 'ok' })
+      const first = f.state.userMessages.at(-1)
+      assert.match(first.payload.text, /outline:/)
+      assert.doesNotMatch(first.payload.text, /> Magpie /)
+      const followup = await handleChatCompletions({ body: { tools, messages: [user, message,
+        { role: 'tool', tool_call_id: call.id, content: 'done' }, { role: 'user', content: 'continue' }] }, outpostMgr: mgr, sessions })
+      assert.equal((await followup.json()).choices[0].message.content, 'Ready')
+      assert.equal(f.state.userMessages.at(-1).threadId, first.threadId)
+      const update = f.state.userMessages.at(-1).payload.text.split('\n\n[tool_result')[0]
+      assert.ok(escapedBytes(update) <= 8 * 1024)
+      assert.match(update, /\n  parameters(?: JSON from offset \d+ of \d+)?:/)
+    }
+  } finally { await f.close() }
+})
+
+test('explicit JSON output keeps the catalog notice separate from the document', async () => {
+  const f = await startFakeQuick({ script: () => [
+    { type: 'text_delta', payload: { delta: '{"ok":true}' } }, { type: 'message_complete', payload: {} },
+  ] })
+  try {
+    for (const type of ['json_object', 'json_schema']) {
+      const res = await handleChatCompletions({ body: { response_format: { type }, messages: [{ role: 'user', content: 'return JSON' }],
+        tools: [{ name: 'read', description: 'Long description. '.repeat(5000) }] }, outpostMgr: fakeMgr(f) })
+      const message = (await res.json()).choices[0].message
+      assert.deepEqual(JSON.parse(message.content), { ok: true })
+      assert.equal(message.reasoning_content, 'Magpie shortened 1 tool description to fit this Quick request.')
+    }
+  } finally { await f.close() }
+})
+
+test('a changed parameter on the same tool name sends the new schema on a fresh thread', async () => {
+  const sessions = createSessionStore()
+  const user = { role: 'user', content: 'Start' }
+  const tool = field => [{ name: 'pick', parameters: {
+    type: 'object', properties: { [field]: { type: 'string' } }, required: [field],
+  } }]
+  const first = await req({ messages: [user], tools: tool('old_key') }, { sessions })
+  const reply = (await first.json()).choices[0].message
+  await req({ messages: [user, reply, { role: 'user', content: 'Continue' }], tools: tool('new_key') }, { sessions })
+    .then(r => r.json())
+  const [prior, current] = fake.state.userMessages.slice(-2)
+  assert.notEqual(prior.threadId, current.threadId)
+  assert.match(current.payload.text, /"required":\["new_key"\]/)
+})
+
+test('an oversized optional-tool turn keeps a call format and retries missing schemas on the next turn', async () => {
+  const sessions = createSessionStore()
+  const tools = [{ name: 'lookup', parameters: {
+    type: 'object', properties: { query: { type: 'string' } }, required: ['query'],
+  } }]
+  const user = { role: 'user', content: 'x'.repeat(65 * 1024) + 'Keep this final question?' }
+  const first = await req({ messages: [user], tools }, { sessions })
+  const reply = (await first.json()).choices[0].message
+  const next = await req({ messages: [user, reply, { role: 'user', content: 'Look up the answer.' }], tools }, { sessions })
+  assert.equal(next.status, 200)
+  await next.json()
+  const [opening, followup] = fake.state.userMessages.slice(-2)
+  assert.equal(opening.threadId, followup.threadId)
+  assert.ok(opening.payload.text.endsWith('Keep this final question?'))
+  assert.match(opening.payload.text, /<tool_call>/)
+  assert.match(opening.payload.text, /- lookup/)
+  assert.doesNotMatch(opening.payload.text, /"required":\["query"\]/)
+  assert.match(followup.payload.text, /"required":\["query"\]/)
+})
+
+test('descriptions and per-turn choices reuse the thread and refresh just the affected tools', async () => {
+  const f = await startFakeQuick({ script: payload => payload.text.includes('requires the client tool "pick"')
+    ? [{ type: 'text_delta', payload: { delta: '<tool_call>{"name":"pick","arguments":{"key":"ok"}}</tool_call>' } },
+      { type: 'message_complete', payload: {} }] : defaultScript(payload) })
+  const sessions = createSessionStore(), outpostMgr = fakeMgr(f), history = []
+  const pick = { name: 'pick', description: 'Pick a value', parameters: { type: 'object', properties: { key: { type: 'string' } }, required: ['key'] } }
+  const search = { name: 'search', description: 'Search agent A', parameters: { type: 'object', properties: {} } }
+  const send = async (tools, choice) => {
+    history.push({ role: 'user', content: 'Next step ' + history.length })
+    const res = await handleChatCompletions({ body: { model: 'smart', messages: history, tools, tool_choice: choice }, outpostMgr, sessions })
+    assert.equal(res.status, 200)
+    const reply = (await res.json()).choices[0].message
+    history.push(reply)
+    for (const c of reply.tool_calls ?? []) history.push({ role: 'tool', tool_call_id: c.id, content: 'ok' })
+    return f.state.userMessages.at(-1).payload
+  }
+  try {
+    const forced = { type: 'function', function: { name: 'pick' } }
+    const restricted = await send([pick, search], forced)
+    assert.match(restricted.text, /- pick/)
+    assert.doesNotMatch(restricted.text, /- search/)
+    const expanded = await send([pick, search], 'auto')
+    assert.match(expanded.text, /- search\n  parameters:/)
+    assert.match(expanded.text, /- search\n  description: Search agent A/)
+    const changed = { ...search, description: 'Search agent B' }
+    const refresh = await send([changed, pick], 'auto')
+    assert.match(refresh.text, /- search\n  description: Search agent B/)
+    assert.doesNotMatch(refresh.text, /\n  parameters:/)
+    assert.doesNotMatch(refresh.text, /- pick/)
+    const same = await send([pick, changed], 'auto')
+    assert.match(same.text, /reminder/)
+    const disabled = await send([pick, changed], 'none')
+    assert.doesNotMatch(disabled.text, /<tool_call>/)
+    assert.match(disabled.custom_prompt, /without calling client tools/)
+    const required = await send([changed, pick], forced)
+    assert.match(required.text, /requires the client tool "pick"/)
+    assert.match(required.text, /key: string/)
+    assert.equal(new Set(f.state.userMessages.map(m => m.threadId)).size, 1)
+  } finally {
+    await f.close()
+  }
+})
+
+test('a required tool fits with the complete question or returns 413 before sending a Quick turn', async () => {
+  const tools = [{ name: 'pick', description: 'Pick', parameters: {
+    type: 'object', properties: { key: { type: 'string', maxLength: 60 } }, required: ['key'],
+  } }]
+  const f = await startFakeQuick({ script: () => [
+    { type: 'text_delta', payload: { delta: '<tool_call>{"name":"pick","arguments":{"key":"ok"}}</tool_call>' } },
+    { type: 'message_complete', payload: {} },
+  ] })
+  const outpostMgr = fakeMgr(f), sessions = createSessionStore()
+  const system = { role: 'system', content: 's'.repeat(16 * 1024) }
+  const q = { role: 'user', content: 'q'.repeat(38 * 1024) + ' exact tail?' }
+  const choice = { type: 'function', function: { name: 'pick' } }
+  const send = (messages, stream = false) => handleChatCompletions({
+    body: { messages, tools, tool_choice: choice, stream }, sessions, outpostMgr,
+  })
+  try {
+    const first = await send([system, q])
+    assert.equal(first.status, 200)
+    const reply = (await first.json()).choices[0].message
+    const opening = f.state.userMessages[0]
+    assert.ok(opening.payload.text.endsWith(q.content))
+    assert.match(opening.payload.text, /maxLength/)
+    const history = [system, q, reply]
+    for (const stream of [false, true]) {
+      const fail = await send([...history, { role: 'user', content: 'x'.repeat(50 * 1024) }], stream)
+      assert.equal(fail.status, 413)
+      assert.match((await fail.json()).error.message, /full current user message and the required client tool/)
+      assert.equal(f.state.userMessages.length, 1)
+    }
+    await (await send([...history, { role: 'user', content: 'Retry' }])).json()
+    assert.equal(f.state.userMessages[1].threadId, opening.threadId)
+  } finally {
+    await f.close()
+  }
+})
+
+test('resuming a thread saved with the old tool scope refreshes its definitions', async () => {
+  const sessions = createSessionStore()
+  const tools = [{ name: 'pick', description: 'Pick', parameters: { type: 'object', properties: { n: { type: 'number' } } } }]
+  const messages = [{ role: 'user', content: 'begin' }, { role: 'assistant', content: 'old reply' }]
+  const previous = sessionScope('test-acct', 'smart|', '', [normalizeTools(tools), 'auto'])
+  const threadId = crypto.randomUUID()
+  sessions.set(chainHashes(previous, messages).at(-1), { threadId })
+  const r = await req({ messages: [...messages, { role: 'user', content: 'continue' }], tools }, { sessions })
+  assert.equal(r.status, 200)
+  await r.json()
+  const frame = fake.state.userMessages.at(-1)
+  assert.equal(frame.threadId, threadId)
+  assert.match(frame.payload.text, /"n":\{"type":"number"\}/)
+})
+
+test('a malformed forced call cannot satisfy the required choice with a placeholder', async () => {
+  const f = await startFakeQuick({ script: () => [
+    { type: 'text_delta', payload: { delta: '<tool_call>{"name":"Read","arguments":{</tool_call>' } },
+    { type: 'message_complete', payload: {} },
+  ] })
+  try {
+    const res = await handleChatCompletions({
+      body: { model: 'smart', messages: [{ role: 'user', content: 'Read the file' }], tools: [fnTool('Read')],
+        tool_choice: { type: 'function', function: { name: 'Read' } } },
+      outpostMgr: fakeMgr(f), sessions: createSessionStore(),
+    })
+    assert.equal(res.status, 502)
+    assert.match((await res.json()).error.message, /without the required client tool call/)
+    assert.equal(f.state.userMessages.length, 1)
+  } finally { await f.close() }
 })
 
 test('edited history starts a fresh thread', async () => {

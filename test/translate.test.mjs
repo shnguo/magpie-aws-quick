@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { textOf, modeFor, effortFor, renderTranscript, renderDelta, byteLen, capText, UPSTREAM_TEXT_LIMIT, imagesOf, pickImages, MAX_UPLOAD_IMAGE_BYTES, MAX_UPLOADS, MAX_UPLOAD_TOTAL_BYTES } from '../lib/translate.mjs'
+import { textOf, modeFor, effortFor, renderTranscript, renderDelta, byteLen, escapedBytes, capText, UPSTREAM_TEXT_LIMIT, imagesOf, pickImages, MAX_UPLOAD_IMAGE_BYTES, MAX_UPLOADS, MAX_UPLOAD_TOTAL_BYTES } from '../lib/translate.mjs'
 
 test('textOf handles strings, parts arrays, and junk', () => {
   assert.equal(textOf('hi'), 'hi')
@@ -114,15 +114,14 @@ test('renderTranscript keeps the opening user message, drops the middle, keeps f
   assert.ok(byteLen(out) <= 8000)
 })
 
-test('renderTranscript caps oversized system prompt and user turn', () => {
+test('renderTranscript keeps the whole current user message when the encoded budget allows', () => {
   const messages = [{ role: 'user', content: 'u'.repeat(30 * 1024) }]
   const stats = {}
   const out = renderTranscript(messages, 's'.repeat(40 * 1024), { maxBytes: UPSTREAM_TEXT_LIMIT, stats })
   assert.ok(stats.truncated)
   assert.ok(out.includes('[truncated]'))
   assert.ok(byteLen(out) <= UPSTREAM_TEXT_LIMIT)
-  assert.ok(out.includes('[middle truncated]')) // user turn cut in the middle…
-  assert.ok(out.endsWith('u')) // …so its end survives
+  assert.ok(out.endsWith(messages[0].content))
 })
 
 test('renderDelta caps oversized tool results per block', () => {
@@ -136,6 +135,28 @@ test('renderDelta caps oversized tool results per block', () => {
   assert.ok(out.includes('[tool_result read c1]'))
   assert.ok(out.includes('next'))
   assert.ok(byteLen(out) < 20 * 1024) // 16KB cap + small user msg
+})
+
+test('the opening task and an escaped current question share the actual wire budget', () => {
+  const question = 'HEAD ' + '🌱"\\\n'.repeat(220) + ' TAIL'
+  const history = [
+    { role: 'user', content: 'Original task ' + 'x'.repeat(4000) },
+    { role: 'assistant', content: 'middle ' + 'y'.repeat(8000) },
+    { role: 'user', content: question },
+  ]
+  const size = escapedBytes(question)
+  for (const budget of [size + 800, size, size - 200]) {
+    const text = renderTranscript(history, '', { maxBytes: budget })
+    assert.ok(escapedBytes(text) <= budget)
+    assert.ok(text.endsWith(' TAIL') && text.includes('HEAD '))
+    if (budget >= size) assert.ok(text.endsWith(question))
+    if (budget > size) assert.match(text, /Original task/)
+    if (budget < size) assert.match(text, /\[middle truncated\]/)
+  }
+  const toolTail = [...history, { role: 'tool', tool_call_id: 'read', content: question }]
+  for (const budget of [0, 20, 64]) {
+    assert.ok(escapedBytes(renderTranscript(toolTail, 'System instructions', { maxBytes: budget })) <= budget)
+  }
 })
 
 test('renderDelta shares the budget across parallel tool results instead of dropping the oldest', () => {

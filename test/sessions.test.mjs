@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  createSessionStore, chainHashes, sessionScope, findContinuation,
+  createSessionStore, chainHashes, sessionScope, findContinuation, claimContinuation,
   extendHash, replyMessage, canonMessage,
 } from '../lib/sessions.mjs'
 
@@ -99,6 +99,19 @@ test('store TTL and LRU eviction', () => {
   assert.equal(store.size, 0)
 })
 
+test('a verified legacy continuation wins over a sibling with the same gateway session ID', () => {
+  const store = createSessionStore()
+  const oldScope = sessionScope('acct1', 'smart|high', 'sys', ['old-tool-scope'])
+  const history = [{ role: 'user', content: 'old task' }, replyMessage('old answer')]
+  const messages = [...history, { role: 'user', content: 'continue' }]
+  const siblingKey = 'sess:' + scope + ':shared'
+  store.set(siblingKey, { threadId: 'sibling' })
+  store.set(chainHashes(oldScope, history).at(-1), { threadId: 'original' })
+  const match = claimContinuation(store, chainHashes(scope, messages), messages, 'shared', () => [oldScope])
+  assert.equal(match.entry.threadId, 'original')
+  assert.equal(store.take(siblingKey).threadId, 'sibling')
+})
+
 test('store persists to disk and a fresh instance resumes entries', async () => {
   const { mkdtempSync, rmSync } = await import('node:fs')
   const { tmpdir } = await import('node:os')
@@ -107,12 +120,22 @@ test('store persists to disk and a fresh instance resumes entries', async () => 
   const file = path.join(dir, 'thread-sessions.json')
   try {
     const s1 = createSessionStore({ file, ttlMs: 60_000 })
-    s1.set('k1', { threadId: 'thread-abc' })
+    const receipt = {
+      ['a'.repeat(64)]: { hash: 'b'.repeat(64), level: 2, chars: 96 },
+      ['c'.repeat(64)]: { hash: 'd'.repeat(64), level: 1, chars: 0, schemaChars: 4871, guidelines: true },
+    }
+    const schemaHashes = { ['a'.repeat(64)]: 'e'.repeat(64) }
+    s1.set('k1', { threadId: 'thread-abc', needsToolSpecs: true, toolCoverage: receipt, schemaHashes, callIds: ['call_A'] })
     s1.set('k2', { threadId: 'thread-def' })
     // persist is debounced — wait for the write
     await new Promise((r) => setTimeout(r, 400))
     const s2 = createSessionStore({ file, ttlMs: 60_000 })
-    assert.equal(s2.take('k1')?.threadId, 'thread-abc')
+    const first = s2.take('k1')
+    assert.equal(first?.threadId, 'thread-abc')
+    assert.equal(first?.needsToolSpecs, true)
+    assert.deepEqual(first?.toolCoverage, receipt)
+    assert.deepEqual(first?.schemaHashes, schemaHashes)
+    assert.deepEqual(first?.callIds, ['call_A'])
     assert.equal(s2.take('k2')?.threadId, 'thread-def')
     assert.equal(s2.size, 0) // take() claims are persisted too
     await new Promise((r) => setTimeout(r, 400))

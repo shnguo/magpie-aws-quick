@@ -97,9 +97,11 @@ is only used when both content tiers fail.
 - **Scope isolation** — the chain is namespaced by
   `H(account, agent_mode, system prompt)`: switching accounts, models or
   system prompt starts a fresh thread rather than resuming a stale one.
-  Thinking effort is a per-turn field and doesn't split threads; tools are
-  tracked per thread, so a tool added mid-session (Claude Code's ToolSearch,
-  skills) keeps the thread and only the new tool's spec is sent.
+  The same thread supports changes in thinking effort, tool descriptions,
+  and per-turn tool choice. New tools, including those loaded by Claude Code's
+  ToolSearch, get their missing definitions incrementally. Removing a declared
+  tool or changing its parameter contract starts a fresh thread. A forced
+  choice limits the current turn and preserves the other tools' delivery records.
 - **Failure-safe** — a reused turn that errors or is cancelled (499, content
   filter, idle timeout) puts its thread back, so the next request still
   continues it. The session-key fallback only resumes when the new tool
@@ -113,7 +115,7 @@ is only used when both content tiers fail.
 - **Bounded memory** — entries expire after 24h idle (agent sessions pause
   far longer than that between turns) and the store is LRU-capped at 200
   threads. The cache persists to `thread-sessions.json` (hashes + thread
-  ids only, no content) so reuse survives plugin reloads; a stale hit is
+  ids, outstanding call ids, schema hashes and tool delivery progress) so reuse survives plugin reloads; a stale hit is
   safe — the handler retries once on a fresh thread with the full
   transcript.
 
@@ -238,15 +240,20 @@ browser or in a private/incognito window, without signing out of the others.
   and `message_complete.tool_calls` is always empty. OpenAI `tools` sent by
   the client are injected as a `<tool_call>{json}</tool_call>` text convention
   and parsed back into standard `tool_calls`; `tool`-role results render as
-  `[tool_result …]` continuing the same thread. The full tool spec is sent
-  once per thread; later turns on a reused thread carry only a short
-  reminder, because everything in the message stays in Quick's thread
-  history and counts toward the context. Reliability depends on the
-  model honoring the convention — verified stable under
-  `tool_choice:'required'` for smart/advanced; occasionally the model answers
-  directly with its own tools (e.g. web search) instead, which shows up as a
-  plain-text reply. If the model instead invokes a client-declared tool
-  through Quick's own native tool channel, the plugin recognizes the call and
+  `[tool_result …]` continuing the same thread. Quick keeps tool definitions in thread history.
+  The adapter tracks which descriptions and schemas have reached Quick. A later
+  turn spends up to 8 KiB of encoded text on missing details. Schemas take
+  priority. A shortened description resumes at its first missing character,
+  and a changed description replaces the earlier one. Large schemas can span
+  several turns. Lifting a forced choice restores access to the other tools
+  using their previously supplied definitions. A required call can reserve
+  more than 8 KiB when its mandatory arguments need that space.
+  When a request needs shorter tool descriptions, parameter outlines, or omitted
+  schemas, Magpie adds a note to the reply with the counts. For explicit JSON
+  output, the note goes in the reasoning field so the document stays parseable.
+  Inline and fenced Markdown examples of tool calls pass through as text.
+  A required choice produces an error if Quick completes without the requested
+  client call. If Quick invokes a client-declared tool through Quick's own native tool channel, the plugin recognizes the call and
   emits it as a normal `tool_calls` item, stopping the turn before Quick can
   rewrite it as text. Quick's built-in tool results are never mapped to OpenAI
   `tool_calls` (that's its internal process).
@@ -275,11 +282,15 @@ browser or in a private/incognito window, without signing out of the others.
   any server feature that needs a connected device (local files/apps) won't
   apply.
 - **Message size**: the whole `user_message` frame is hard-capped at 64 KB
-  server-side (text, instructions and attachments share it). Oversized system prompts /
-  tool schemas / history are compacted automatically (schema de-annotation,
-  tool-spec lite then names-only fallback, oldest-first history trimming,
-  capped tool results). Ordinary chat keeps full system instructions when they fit alongside the
-  encoded turn. Claude Code Auto permission reviews require the complete policy
+  server-side (text, instructions and attachments share it). The adapter measures the serialized frame and reserves space for the current
+  user message before adding the tool catalog. It shortens tool descriptions
+  first, then converts schemas to typed outlines that retain nested fields,
+  required flags, enum values and validation constraints. Even a very large
+  optional-tool turn reserves space for the call format and a tool name.
+  A required choice reserves a callable argument outline and the full current
+  question. If they cannot fit together, the adapter returns HTTP 413 before
+  sending that turn. Earlier history and tool results share the remaining space. Ordinary chat keeps full system
+  instructions when they fit alongside the encoded turn. Claude Code Auto permission reviews require the complete policy
   and transcript in one frame. An oversized review returns HTTP 413 before
   contacting Quick. In Claude Code, Manual mode lets you approve tool requests.
 
