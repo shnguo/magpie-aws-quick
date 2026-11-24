@@ -88,9 +88,9 @@ continuations through three tiers, most precise first:
 - **Gateway session key** — as a last resort, a stable session id the
   gateway stamps on every request of a chat (magpie's
   `x-magpie-session` header; OpenAI clients like pi also send their own
-  session-affinity headers) identifies the conversation even when
-  history was rewritten beyond recognition. The entry rewrites itself
-  every turn, so aggressive compaction can't strand it.
+  session-affinity headers) helps recover a compacted conversation. For a tool
+  result, the call ID must belong to that thread. For a text follow-up, the
+  last assistant reply must identify the thread unambiguously.
 
 Tier order matters: verified content matches always win; the session key
 is only used when both content tiers fail.
@@ -104,14 +104,12 @@ is only used when both content tiers fail.
   choice limits the current turn and preserves the other tools' delivery records.
 - **Failure-safe** — a reused turn that errors or is cancelled (499, content
   filter, idle timeout) puts its thread back, so the next request still
-  continues it. The session-key fallback only resumes when the new tool
-  results answer calls that thread made, so parallel subagents sharing one
-  session id never splice into each other's threads.
-- **Edit & branch detection** — any change to earlier messages alters the
-  hashes, so edited or branched history can never silently continue a
-  thread that doesn't match; only append-only tails qualify. Cached
-  entries are claimed on use (single-use), so a client retry cannot
-  replay a turn.
+  continues it.
+- **Edited and branched conversations** — strict matching preserves whitespace
+  in user and tool messages. Compaction may rewrite older text and still match
+  through the fallback rules above. Replacing a historical image or matching
+  the same anchors on two branches starts a fresh thread with a replay of the
+  supplied conversation. The current turn gets first claim on attachment space.
 - **Bounded memory** — entries expire after 24h idle (agent sessions pause
   far longer than that between turns) and the store is LRU-capped at 200
   threads. The cache persists to `thread-sessions.json` (hashes + thread
@@ -291,7 +289,8 @@ browser or in a private/incognito window, without signing out of the others.
   A required choice reserves a callable argument outline and the full current
   question. If they cannot fit together, the adapter returns HTTP 413 before
   sending that turn. Earlier history and tool results share the remaining space. Ordinary chat keeps full system
-  instructions when they fit alongside the encoded turn. Claude Code Auto permission reviews require the complete policy
+  instructions when they fit alongside the encoded turn. Oversized instructions retain
+  their opening and closing text when space permits. Claude Code Auto permission reviews require the complete policy
   and transcript in one frame. An oversized review returns HTTP 413 before
   contacting Quick. In Claude Code, Manual mode lets you approve tool requests.
 

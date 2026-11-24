@@ -40,6 +40,7 @@ export function createProxyServer({ options = {}, token = '', outpostMgr, sessio
       if (req.method === 'GET' && /\/models$/.test(path)) out = handleModels()
       else if (req.method === 'POST' && /\/chat\/completions$/.test(path)) {
         let raw = ''
+        req.setEncoding('utf8')
         for await (const c of req) raw += c
         let body
         try { body = JSON.parse(raw || '{}') } catch {

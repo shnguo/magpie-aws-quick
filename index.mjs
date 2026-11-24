@@ -150,7 +150,7 @@ function makeFetch(outpostMgr, opts, sessions) {
       sessions,
       options: { ...opts, identity, sessionKey },
       effortHeader: headerOf(input, init, 'x-magpie-effort'),
-      signal: init?.signal,
+      signal: init?.signal ?? (input instanceof Request ? input.signal : undefined),
     })
   }
 }

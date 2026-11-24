@@ -1,6 +1,7 @@
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { startFakeQuick, defaultScript } from './helpers/fake-quick.mjs'
+import { startChatFixture } from './helpers/chat-fixture.mjs'
 import { PLAIN_TEXT_NOTE, TOOLS_STILL_APPLY, INVALID_CALL_TOOL, handleChatCompletions, handleModels } from '../lib/handler.mjs'
 import { createSessionStore, chainHashes, sessionScope } from '../lib/sessions.mjs'
 import { normalizeTools } from '../lib/tools.mjs'
@@ -160,7 +161,7 @@ test('images too big for the frame that cannot be uploaded are skipped with a no
 })
 
 test('system prompt shares the 64KB frame budget with text', async () => {
-  const bigSys = 'S'.repeat(40 * 1024)
+  const bigSys = 'Opening rule. ' + 'S'.repeat(40 * 1024) + ' Closing rule.'
   const bigUser = 'U'.repeat(30 * 1024)
   await req({
     model: 'fast',
@@ -170,8 +171,10 @@ test('system prompt shares the 64KB frame budget with text', async () => {
     ],
   })
   const p = fake.state.userMessages.at(-1).payload
-  assert.ok(p.custom_prompt.endsWith('…[truncated]'))
-  assert.ok(p.custom_prompt.includes('S'.repeat(32 * 1024)))
+  assert.ok(p.custom_prompt.includes('Opening rule. '))
+  assert.ok(p.custom_prompt.includes('…[middle truncated]…'))
+  assert.ok(p.custom_prompt.endsWith(' Closing rule.'))
+  assert.ok((p.custom_prompt.match(/S/g) ?? []).length > 31 * 1024)
   assert.ok(frameBytes(p.thread_id, p) <= UPSTREAM_TEXT_LIMIT)
 })
 
@@ -957,6 +960,34 @@ test('direct backend uploads a large image and sends the workspace path', async 
   } finally {
     await f.close()
   }
+})
+
+test('stale-thread replay restores older images without displacing the current attachment', async t => {
+  let attempt = 0
+  const { fake, request } = await startChatFixture(t, { script: p => ++attempt === 2
+    ? [{ type: 'error', payload: { message: 'thread expired' } }] : defaultScript(p) })
+  const calls = []
+  const options = { fetchImpl: uploadFetch(calls) }
+  const original = bigImageMsg(25 * 1024, 'This is the reference image.')
+  const current = bigImageMsg(26 * 1024, 'Compare this image with the reference.')
+  const first = await request({ messages: [original] }, options)
+  assert.equal(first.status, 200)
+  const reply = (await first.json()).choices[0].message
+  const second = await request({ messages: [original, reply, current] }, options)
+  assert.equal(second.status, 200)
+  const [initial, stale, replay] = fake.state.userMessages
+  assert.equal(initial.threadId, stale.threadId)
+  assert.notEqual(replay.threadId, stale.threadId)
+  assert.equal(stale.payload.attachments.length, 1)
+  const [olderImage, currentImage] = replay.payload.attachments
+  assert.equal(olderImage.name, 'image-1.png')
+  assert.equal(olderImage.path, '/data/x/attached_files/image-1.png')
+  assert.equal(olderImage.size, initial.payload.attachments[0].size)
+  assert.equal(currentImage.name, 'image-2.png')
+  assert.equal(currentImage.data, stale.payload.attachments[0].data)
+  assert.equal(calls.length, 3)
+  assert.equal(JSON.parse(calls[2].init.body).eventBody.invokeAgent.path, 'files/upload/' + replay.threadId)
+  assert.ok(frameBytes(replay.threadId, replay.payload) <= UPSTREAM_TEXT_LIMIT)
 })
 
 test('failed image upload still answers 200 with a not-delivered note', async () => {

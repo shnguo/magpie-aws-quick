@@ -92,7 +92,8 @@ test('ordinary oversized instructions still deliver the question within the esca
     assert.equal(r.status, 200)
     const { payload, threadId } = f.state.userMessages[0]
     assert.equal(payload.text, question)
-    assert.ok(payload.custom_prompt.endsWith('…[truncated]'))
+    assert.ok(payload.custom_prompt.includes('…[middle truncated]…'))
+    assert.ok(payload.custom_prompt.endsWith(system.slice(-100)))
     assert.ok(payload.custom_prompt.isWellFormed())
     assert.ok(frameBytes(threadId, payload) <= UPSTREAM_TEXT_LIMIT)
   } finally { await f.close() }
