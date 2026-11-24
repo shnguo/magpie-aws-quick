@@ -91,7 +91,7 @@ continuations through three tiers, most precise first:
 Tier order matters: verified content matches always win; the session key
 is only used when both content tiers fail.
 - **Scope isolation** — the chain is namespaced by
-  `H(account, agent_mode, thinking_effort, system prompt, tool names)`:
+  `H(account, agent_mode, thinking_effort, system prompt, tool definitions and choice)`:
   switching accounts, models, effort, system prompt, or the toolset
   starts a fresh thread rather than resuming a stale one.
 - **Edit & branch detection** — any change to earlier messages alters the
@@ -102,7 +102,7 @@ is only used when both content tiers fail.
 - **Bounded memory** — entries expire after 24h idle (agent sessions pause
   far longer than that between turns) and the store is LRU-capped at 200
   threads. The cache persists to `thread-sessions.json` (hashes + thread
-  ids only, no content) so reuse survives plugin reloads; a stale hit is
+  ids and a flag for incomplete tool definitions) so reuse survives plugin reloads; a stale hit is
   safe — the handler retries once on a fresh thread with the full
   transcript.
 
@@ -219,10 +219,10 @@ A few plugin options tune request handling (`magpie plugin options aws-quick '{�
   and `message_complete.tool_calls` is always empty. OpenAI `tools` sent by
   the client are injected as a `<tool_call>{json}</tool_call>` text convention
   and parsed back into standard `tool_calls`; `tool`-role results render as
-  `[tool_result …]` continuing the same thread. The full tool spec is sent
-  once per thread; later turns on a reused thread carry only a short
-  reminder, because everything in the message stays in Quick's thread
-  history and counts toward the context. Reliability depends on the
+  `[tool_result …]` continuing the same thread. Quick keeps tool definitions in thread history. Later turns carry a short
+  reminder once the thread has received the parameter schemas or complete
+  outlines. If a turn could fit only partial outlines or names, the adapter
+  sends the definitions again on the next turn. Reliability depends on the
   model honoring the convention — verified stable under
   `tool_choice:'required'` for smart/advanced; occasionally the model answers
   directly with its own tools (e.g. web search) instead, which shows up as a
@@ -255,11 +255,12 @@ A few plugin options tune request handling (`magpie plugin options aws-quick '{�
   any server feature that needs a connected device (local files/apps) won't
   apply.
 - **Message size**: the whole `user_message` frame is hard-capped at 64 KB
-  server-side (text, instructions and attachments share it). Oversized system prompts /
-  tool schemas / history are compacted automatically (schema de-annotation,
-  tool-spec lite then names-only fallback, oldest-first history trimming,
-  capped tool results). Ordinary chat keeps full system instructions when they fit alongside the
-  encoded turn. Claude Code Auto permission reviews require the complete policy
+  server-side (text, instructions and attachments share it). The adapter measures the serialized frame and reserves space for the current
+  user message before adding the tool catalog. It shortens tool descriptions
+  first, then converts schemas to typed outlines that retain nested fields,
+  required flags, enum values and conditional requirements. Earlier history
+  and tool results share the remaining space. Ordinary chat keeps full system
+  instructions when they fit alongside the encoded turn. Claude Code Auto permission reviews require the complete policy
   and transcript in one frame. An oversized review returns HTTP 413 before
   contacting Quick. In Claude Code, Manual mode lets you approve tool requests.
 

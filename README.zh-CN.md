@@ -76,7 +76,7 @@ Quick 在服务端按 `thread_id` 保存会话历史，而 OpenAI 客户端每�
 层级顺序很重要：内容匹配命中永远优先，会话键只在前两级都失败时启用。
 
 - **scope 隔离** —— 哈希链按 `H(账号, agent_mode, thinking_effort,
-  system prompt, 工具名集合)` 命名空间隔离：换账号、换模型、换推理强度、
+  system prompt, 工具定义及调用选项)` 命名空间隔离：换账号、换模型、换推理强度、
   改 system prompt 或工具集，都会透明地新建 thread，而不是续接到一个
   不匹配的旧会话。
 - **编辑/分叉检测** —— 更早消息的任何改动都会改变哈希，所以被编辑或
@@ -84,7 +84,7 @@ Quick 在服务端按 `thread_id` 保存会话历史，而 OpenAI 客户端每�
   销毁（single-use），客户端重试也不会重放一个 turn。
 - **有界内存** —— 条目空闲 24 小时过期（agent 会话的轮次间隔远超半小时），
   LRU 上限 200 个 thread。缓存持久化到 `thread-sessions.json`（只存哈希 +
-  thread id，无内容），插件重载后仍可续接；命中过期 thread 是安全的：
+  thread id 和工具定义是否完整的标记），插件重载后仍可续接；命中过期 thread 是安全的：
   handler 会用完整 transcript 自动重试一次新 thread。
 
 ### 模型：agent_mode，不是模型 id
@@ -186,9 +186,8 @@ magpie login aws-quick              # 按提示选择登录方式
   `tool_start`/`tool_result` 等事件由它自己执行、客户端只观测，`message_complete.tool_calls`
   恒为空。客户端传入的 OpenAI `tools` 通过提示词注入为 `<tool_call>{json}</tool_call>`
   文本约定，由插件解析成标准 `tool_calls` 返回；`tool` 角色的结果渲染为
-  `[tool_result …]` 续接同一 thread。完整的工具说明每个 thread 只发一次，
-  复用 thread 的后续轮次只带一段简短提醒：消息里的内容都会留在 Quick 的
-  thread 历史里、计入上下文。可靠性取决于模型遵守约定——已实测
+  `[tool_result …]` 续接同一 thread。Quick 会把工具定义保存在 thread 历史中。收到参数 schema 或完整的参数概要后，
+  后续轮次只带一段简短提醒。如果本轮只能容纳部分参数或工具名，适配器会在下一轮重发定义。可靠性取决于模型遵守约定——已实测
   `tool_choice:'required'` 下 smart/advanced 均能稳定产出；模型偶尔会先用
   自带工具（如联网搜索）直接作答，此时表现为普通文本回复。若模型改用
   Quick 自己的原生工具通道调用了客户端声明的工具，插件会识别该调用并按
@@ -206,9 +205,9 @@ magpie login aws-quick              # 按提示选择登录方式
 - **会话与账号绑定**：thread 复用的 scope 里包含账号身份哈希；换号后旧 thread 自动失效重建。
 - **多窗口/并发**：同一 QuickSocket 上不同 thread 可并行 turn；同一 thread 的并发请求会被拒绝（`busy`）。
 - **消息体积**：整个 `user_message` 帧服务端上限 64KB（`text` 与
-  指令及附件共享）。超大 system prompt / 工具 schema / 会话历史会自动
-  压缩（schema 去注解、工具规格 lite→仅名字降级、历史从旧到新裁、
-  tool_result 封顶），
+  指令及附件共享）。适配器按序列化后的字节数为当前用户消息预留空间，再放入工具定义。
+  空间不足时先缩短工具描述，再把较大的 schema 压缩为参数概要，保留嵌套字段、
+  必填标记、枚举和条件必填规则。较早的历史与工具结果共享剩余空间。
   普通对话的系统指令与本轮消息编码后若能放进同一帧，就会完整发送。
   Claude Code 的 Auto 权限审核要求策略和待审记录完整放进同一帧，超限时在请求
   Quick 前返回 HTTP 413。可使用 Claude Code 的 Manual 模式自行确认工具请求。

@@ -221,6 +221,98 @@ test('thread reuse: extended conversation continues the same thread with delta o
   assert.ok(!t2.payload.text.includes('remember teal'))
 })
 
+test('fresh and retried Quick threads preserve the complete user turn and plan fields', async () => {
+  const system = { role: 'system', content: 's'.repeat(36 * 1024) }
+  const user = { role: 'user', content: 'line 🪴 "quoted"\n'.repeat(660) + 'Which file should I open first?' }
+  const plan = {
+    name: 'update_plan',
+    parameters: { type: 'object', properties: {
+      items: { type: 'array', items: { type: 'object', properties: {
+        content: { type: 'string' }, status: { type: 'string', enum: ['pending', 'in_progress', 'completed'] },
+      }, required: ['content', 'status'] } },
+      scope: { type: 'string', enum: ['first_task', 'continuation', 'new_task'],
+        description: 'Required with items. Omit on advance.' },
+      advance: { type: 'boolean' },
+    } },
+  }
+  const tools = Array.from({ length: 32 }, (_, i) => ({
+    name: 'tool_' + i, description: 'Long tool description. '.repeat(120),
+    parameters: { type: 'object', properties: Object.fromEntries(Array.from({ length: 9 }, (_, j) =>
+      ['field_' + j, { type: 'string' }])) },
+  })).concat(plan)
+  let count = 0
+  const f = await startFakeQuick({ script: payload => ++count === 2
+    ? [{ type: 'error', payload: { message: 'thread expired' } }] : defaultScript(payload) })
+  const mgr = fakeMgr(f)
+  const sessions = createSessionStore()
+  const send = async messages => {
+    const res = await handleChatCompletions({ body: { model: 'smart', messages, tools }, outpostMgr: mgr, sessions,
+      options: { identity: 'plan-budget' } })
+    assert.equal(res.status, 200)
+    return (await res.json()).choices[0].message
+  }
+  try {
+    const reply = await send([system, user])
+    await send([system, user, reply, user])
+    const [fresh, continuation, retried] = f.state.userMessages
+    assert.equal(f.state.userMessages.length, 3)
+    assert.equal(fresh.threadId, continuation.threadId)
+    assert.notEqual(retried.threadId, fresh.threadId)
+    assert.match(continuation.payload.text, /Client tool calling — reminder/)
+    for (const { threadId, payload } of [fresh, retried]) {
+      assert.ok(payload.text.endsWith('\n\n' + user.content))
+      assert.ok(frameBytes(threadId, payload) <= UPSTREAM_TEXT_LIMIT)
+      const spec = payload.text.split('\n- update_plan')[1].split('\n\n')[0]
+      assert.match(spec, /Required with items\. Omit on advance\./)
+      if (spec.includes('  parameters: ')) {
+        const { properties } = JSON.parse(spec.split('  parameters: ')[1])
+        assert.deepEqual(properties.items.items.required, ['content', 'status'])
+        assert.equal(properties.items.items.properties.content.type, 'string')
+        assert.deepEqual(properties.items.items.properties.status.enum, ['pending', 'in_progress', 'completed'])
+        assert.deepEqual(properties.scope.enum, ['first_task', 'continuation', 'new_task'])
+      } else {
+        assert.match(spec, /items\?: Array<\{content: string, status: "pending"\|"in_progress"\|"completed"/)
+        assert.match(spec, /scope\?: "first_task"\|"continuation"\|"new_task"/)
+      }
+    }
+  } finally {
+    await f.close()
+  }
+})
+
+test('a changed parameter on the same tool name sends the new schema on a fresh thread', async () => {
+  const sessions = createSessionStore()
+  const user = { role: 'user', content: 'Start' }
+  const tool = field => [{ name: 'pick', parameters: {
+    type: 'object', properties: { [field]: { type: 'string' } }, required: [field],
+  } }]
+  const first = await req({ messages: [user], tools: tool('old_key') }, { sessions })
+  const reply = (await first.json()).choices[0].message
+  await req({ messages: [user, reply, { role: 'user', content: 'Continue' }], tools: tool('new_key') }, { sessions })
+    .then(r => r.json())
+  const [prior, current] = fake.state.userMessages.slice(-2)
+  assert.notEqual(prior.threadId, current.threadId)
+  assert.match(current.payload.text, /"required":\["new_key"\]/)
+})
+
+test('an opening turn with no room for tools resends the schema on the next turn', async () => {
+  const sessions = createSessionStore()
+  const tools = [{ name: 'lookup', parameters: {
+    type: 'object', properties: { query: { type: 'string' } }, required: ['query'],
+  } }]
+  const user = { role: 'user', content: 'x'.repeat(65 * 1024) + 'Keep this final question?' }
+  const first = await req({ messages: [user], tools }, { sessions })
+  const reply = (await first.json()).choices[0].message
+  const next = await req({ messages: [user, reply, { role: 'user', content: 'Look up the answer.' }], tools }, { sessions })
+  assert.equal(next.status, 200)
+  await next.json()
+  const [opening, followup] = fake.state.userMessages.slice(-2)
+  assert.equal(opening.threadId, followup.threadId)
+  assert.ok(opening.payload.text.endsWith('Keep this final question?'))
+  assert.doesNotMatch(opening.payload.text, /- lookup/)
+  assert.match(followup.payload.text, /"required":\["query"\]/)
+})
+
 test('edited history starts a fresh thread', async () => {
   const sessions = createSessionStore()
   const u1 = { role: 'user', content: 'alpha' }

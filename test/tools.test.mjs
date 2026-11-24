@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { normalizeTools, buildToolPreamble, createToolCallParser, slimSchema } from '../lib/tools.mjs'
-import { byteLen } from '../lib/translate.mjs'
+import { escapedBytes } from '../lib/translate.mjs'
 
 test('normalizeTools keeps only named function tools', () => {
   const tools = normalizeTools([
@@ -45,7 +45,7 @@ test('slimSchema strips annotation keywords, keeps structure', () => {
   assert.equal(slim.properties.b.properties.c.examples, undefined)
 })
 
-test('preamble compacts schema annotations and caps giant schemas', () => {
+test('preamble keeps a large schema when it fits and preserves its required fields under pressure', () => {
   const bigProps = {}
   for (let i = 0; i < 200; i++) {
     bigProps[`field_${i}`] = { type: 'string', description: 'd'.repeat(80) }
@@ -58,13 +58,17 @@ test('preamble compacts schema annotations and caps giant schemas', () => {
   // small tool keeps its (slimmed) schema incl. type info
   assert.ok(p.includes('"x":{"type":"string"}'))
   assert.ok(!p.includes('"doc"')) // property description stripped
-  // huge tool degrades to bare object + required
-  assert.ok(p.includes('"properties":{}'))
-  assert.ok(p.includes('"required":["field_0"]'))
-  assert.ok(!p.includes('field_1'))
+  assert.ok(p.includes('"field_199":{"type":"string"}'))
+  const stats = {}
+  const tight = buildToolPreamble(tools, 'auto', { maxBytes: 1500, stats })
+  assert.ok(escapedBytes(tight) <= 1500)
+  assert.ok(tight.includes('field_0: string'))
+  assert.ok(tight.includes('field_1?: string'))
+  assert.ok(tight.includes('partial outline:'))
+  assert.equal(stats.needsToolSpecs, true)
 })
 
-test('preamble falls back to name+description when toolset is enormous', () => {
+test('long descriptions shrink before schemas and compact outlines retain field names', () => {
   const tools = normalizeTools(Array.from({ length: 60 }, (_, i) => ({
     type: 'function',
     function: {
@@ -73,11 +77,14 @@ test('preamble falls back to name+description when toolset is enormous', () => {
       parameters: { type: 'object', properties: Object.fromEntries(Array.from({ length: 15 }, (_, j) => [`p${j}`, { type: 'string', description: 'x'.repeat(60) }])) },
     },
   })))
-  const p = buildToolPreamble(tools, 'auto')
-  assert.ok(byteLen(p) < 45 * 1024)
-  assert.ok(p.includes('parameter schemas omitted'))
-  assert.ok(p.includes('- tool_0:'))
-  assert.ok(!p.includes('"properties"'))
+  const p = buildToolPreamble(tools, 'auto', { maxBytes: 24 * 1024 })
+  assert.ok(escapedBytes(p) <= 24 * 1024)
+  assert.equal((p.match(/^  (?:parameters|outline):/gm) ?? []).length, tools.length)
+  assert.ok(p.includes('p14?: string'))
+  const short = buildToolPreamble(normalizeTools([{ name: 'one', description: 'x'.repeat(5000),
+    input_schema: { type: 'object', properties: { city: { type: 'string' } }, required: ['city'] } }]), 'auto', { maxBytes: 2400 })
+  assert.ok(short.includes('"required":["city"]'))
+  assert.ok(short.includes('[truncated]'))
 })
 
 test('parser extracts blocks split across deltas', () => {
