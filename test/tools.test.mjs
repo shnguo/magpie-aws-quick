@@ -115,13 +115,16 @@ test('tool descriptions, outlines and omitted validation detail can improve on a
   assert.equal(clipped.needsToolSpecs, true)
   assert.equal(clipped.toolNotice, 'Magpie shortened 1 tool description to fit this Quick request.')
   const repeated = {}
-  const reminder = buildToolPreamble(tools, 'auto', { maxBytes: 3500, previous: clipped.toolCoverage, stats: repeated })
-  assert.match(reminder, /reminder/)
+  const update = buildToolPreamble(tools, 'auto', { maxBytes: 3500, previous: clipped.toolCoverage, stats: repeated })
+  const continuation = '\n  description continued: '
+  const prefix = short.split('- report: ')[1].split('\n…[truncated]')[0]
+  assert.ok(update.includes(continuation))
+  assert.doesNotMatch(update, /\n  parameters:/)
   assert.equal(repeated.needsToolSpecs, true)
   assert.equal(repeated.toolNotice, '')
   const complete = {}
   const upgraded = buildToolPreamble(tools, 'auto', { previous: repeated.toolCoverage, stats: complete })
-  assert.ok(upgraded.includes(tools[0].description))
+  assert.equal(prefix + update.split(continuation)[1] + upgraded.split(continuation)[1], tools[0].description)
   assert.equal(complete.needsToolSpecs, false)
   assert.equal(complete.toolNotice, '')
   const tight = {}
@@ -155,16 +158,19 @@ test('a fixed per-turn budget can finish clipped descriptions over multiple turn
   const first = buildToolPreamble(tools, 'auto', { maxBytes: 3200, stats })
   assert.match(first, /\[truncated\]/)
   assert.equal(stats.needsToolSpecs, true)
-  const received = new Set()
+  const received = new Map(Array.from(first.matchAll(/^- ([a-d]): ([a-d]+)/gm), m => [m[1], m[2]]))
   for (let i = 0; i < tools.length; i++) {
     const previous = stats.toolCoverage
     stats = {}
     const update = buildToolPreamble(tools, 'auto', { maxBytes: 3200, previous, stats })
     assert.ok(escapedBytes(update) <= 3200)
-    for (const tool of tools) if (update.includes(tool.description)) received.add(tool.name)
+    assert.doesNotMatch(update, /\n  parameters:/)
+    for (const [, name, part] of update.matchAll(/^- ([a-d])\n  description continued: ([a-d]+)/gm)) {
+      received.set(name, received.get(name) + part)
+    }
     if (!stats.needsToolSpecs) break
   }
-  assert.equal(received.size, tools.length)
+  for (const tool of tools) assert.equal(received.get(tool.name), tool.description)
   assert.equal(stats.needsToolSpecs, false)
 })
 
@@ -176,7 +182,7 @@ test('tool scope is stable across key order, top-level descriptions and choice b
   assert.notDeepEqual(catalog.contracts, createToolCatalog([{ name: 'empty' }, { ...b, parameters: { type: 'string', maxLength: 61 } }], 'auto').contracts)
 })
 
-test('lifting a forced choice advertises previously known hidden tools again', () => {
+test('lifting a forced choice restores availability while retaining known definitions', () => {
   const tools = normalizeTools([{ name: 'read' }, { name: 'write' }])
   const complete = {}, forced = {}, restored = {}
   buildToolPreamble(tools, 'auto', { stats: complete })
@@ -186,10 +192,70 @@ test('lifting a forced choice advertises previously known hidden tools again', (
   assert.equal(forced.toolNotice, '')
   assert.doesNotMatch(limited, /- write/)
   const expanded = buildToolPreamble(tools, 'auto', { previous: forced.toolCoverage, stats: restored })
-  assert.match(expanded, /- write\n  parameters:/)
-  assert.doesNotMatch(expanded, /- read/)
+  assert.match(expanded, /Available: read, write/)
+  assert.doesNotMatch(expanded, /\n  parameters:/)
+  assert.deepEqual(restored.toolCoverage, complete.toolCoverage)
   assert.equal(restored.needsToolSpecs, false)
   assert.equal(restored.toolNotice, '')
+})
+
+test('unseen large schemas and descriptions arrive once in byte-bounded updates', () => {
+  const properties = Object.fromEntries(Array.from({ length: 450 }, (_, n) => ['field_' + n,
+    { type: 'string', pattern: '^[文🍋"]+$', maxLength: n + 1 }]))
+  const schema = { type: 'object', properties, required: ['field_449'] }
+  const description = 'Read "文🍋" and keep the result.\n'.repeat(750)
+  const original = [{ name: 'small' }, { name: 'large', parameters: schema, description }]
+  let stats = {}
+  buildToolPreamble(original, { type: 'function', function: { name: 'small' } }, { stats })
+  let json = '', docs = '', turns = 0
+  while (stats.needsToolSpecs && turns++ < 25) {
+    const previous = stats.toolCoverage
+    stats = {}
+    const reordered = { required: schema.required, properties: Object.fromEntries(Object.entries(properties).reverse()), type: 'object' }
+    const tools = [original[0], { ...original[1], parameters: turns % 2 ? schema : reordered }]
+    const text = buildToolPreamble(tools, 'auto', { maxBytes: 60 * 1024, previous, stats })
+    assert.ok(text.isWellFormed())
+    assert.ok(escapedBytes(text) <= 8192)
+    assert.doesNotMatch(text, /- small\n  parameters:/)
+    if (turns === 1) assert.match(text, /field_449: string/)
+    const part = text.match(/^  parameters JSON from offset (\d+) of (\d+): (.+)$/m)
+    if (part) {
+      assert.equal(+part[1], json.length)
+      json += part[3]
+    }
+    const doc = text.match(/\n  description( continued)?: ([\s\S]*)$/)
+    if (doc) {
+      assert.equal(Boolean(doc[1]), Boolean(docs))
+      docs += doc[2]
+    }
+  }
+  assert.equal(stats.needsToolSpecs, false)
+  assert.deepEqual(JSON.parse(json), schema)
+  assert.equal(docs, description)
+  assert.match(buildToolPreamble(original, 'auto', { previous: stats.toolCoverage }), /reminder/)
+})
+
+test('a mandatory argument outline can use the space its validated call requires', () => {
+  const keys = Array.from({ length: 700 }, (_, i) => 'required_field_' + i)
+  const parameters = { type: 'object', properties: Object.fromEntries(keys.map(k => [k, { type: 'string' }])), required: keys }
+  const catalog = createToolCatalog([{ name: 'publish', parameters }], 'required')
+  assert.ok(catalog.minimumBytes > 8192)
+  const text = catalog.render({ previous: {}, maxBytes: catalog.minimumBytes })
+  assert.equal(escapedBytes(text), catalog.minimumBytes)
+  assert.match(text, /required_field_699: string/)
+})
+
+test('a description cleared during a minimum-size turn is explicitly replaced later', () => {
+  const first = {}, tight = {}, complete = {}
+  buildToolPreamble([{ name: 'query', description: 'Old instructions.' }], 'auto', { stats: first })
+  const catalog = createToolCatalog([{ name: 'query', description: '' }], 'auto')
+  const minimum = catalog.render({ previous: first.toolCoverage, maxBytes: catalog.minimumBytes, stats: tight })
+  assert.match(minimum, /- query/)
+  assert.equal(tight.needsToolSpecs, true)
+  const later = catalog.render({ previous: tight.toolCoverage, stats: complete })
+  assert.match(later, /description: \(cleared\)/)
+  assert.doesNotMatch(later, /parameters:/)
+  assert.equal(complete.needsToolSpecs, false)
 })
 
 test('streaming preserves Markdown examples and literal tags while extracting the real call', () => {

@@ -4,7 +4,7 @@ import { startFakeQuick, defaultScript } from './helpers/fake-quick.mjs'
 import { PLAIN_TEXT_NOTE, TOOLS_STILL_APPLY, handleChatCompletions, handleModels } from '../lib/handler.mjs'
 import { createSessionStore, chainHashes, sessionScope } from '../lib/sessions.mjs'
 import { normalizeTools } from '../lib/tools.mjs'
-import { byteLen, frameBytes, UPSTREAM_TEXT_LIMIT } from '../lib/translate.mjs'
+import { byteLen, escapedBytes, frameBytes, UPSTREAM_TEXT_LIMIT } from '../lib/translate.mjs'
 import { OutpostError } from '../lib/outpost.mjs'
 
 let fake
@@ -260,8 +260,9 @@ test('fresh and retried Quick threads preserve the complete user turn and plan f
     assert.equal(f.state.userMessages.length, 3)
     assert.equal(fresh.threadId, continuation.threadId)
     assert.notEqual(retried.threadId, fresh.threadId)
-    assert.ok(continuation.payload.text.includes(tools[0].description), 'the continuing thread should receive previously clipped descriptions')
-    assert.ok((continuation.payload.text.match(/^\- tool_/gm) ?? []).length < tools.length - 1)
+    const catalog = continuation.payload.text.slice(0, -('\n\n' + user.content).length)
+    assert.ok(escapedBytes(catalog) <= 8 * 1024)
+    assert.match(catalog, /\n  (?:parameters|description continued):/)
     assert.ok(continuation.payload.text.endsWith(user.content))
     assert.ok(frameBytes(continuation.threadId, continuation.payload) <= UPSTREAM_TEXT_LIMIT)
     for (const { threadId, payload } of [fresh, retried]) {
@@ -327,7 +328,9 @@ test('streaming and JSON return one catalog notice, preserve tool calls, and reu
         { role: 'tool', tool_call_id: call.id, content: 'done' }, { role: 'user', content: 'continue' }] }, outpostMgr: mgr, sessions })
       assert.equal((await followup.json()).choices[0].message.content, 'Ready')
       assert.equal(f.state.userMessages.at(-1).threadId, first.threadId)
-      assert.ok(f.state.userMessages.at(-1).payload.text.includes(tools[0].description))
+      const update = f.state.userMessages.at(-1).payload.text.split('\n\n[tool_result')[0]
+      assert.ok(escapedBytes(update) <= 8 * 1024)
+      assert.match(update, /\n  parameters(?: JSON from offset \d+ of \d+)?:/)
     }
   } finally { await f.close() }
 })
@@ -404,10 +407,12 @@ test('descriptions and per-turn choices reuse the thread and refresh just the af
     assert.match(restricted.text, /- pick/)
     assert.doesNotMatch(restricted.text, /- search/)
     const expanded = await send([pick, search], 'auto')
-    assert.match(expanded.text, /- search: Search agent A/)
+    assert.match(expanded.text, /- search\n  parameters:/)
+    assert.match(expanded.text, /- search\n  description: Search agent A/)
     const changed = { ...search, description: 'Search agent B' }
     const refresh = await send([changed, pick], 'auto')
-    assert.match(refresh.text, /- search: Search agent B/)
+    assert.match(refresh.text, /- search\n  description: Search agent B/)
+    assert.doesNotMatch(refresh.text, /\n  parameters:/)
     assert.doesNotMatch(refresh.text, /- pick/)
     const same = await send([pick, changed], 'auto')
     assert.match(same.text, /reminder/)

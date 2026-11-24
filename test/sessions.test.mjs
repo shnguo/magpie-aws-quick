@@ -107,7 +107,10 @@ test('store persists to disk and a fresh instance resumes entries', async () => 
   const file = path.join(dir, 'thread-sessions.json')
   try {
     const s1 = createSessionStore({ file, ttlMs: 60_000 })
-    const receipt = { ['a'.repeat(64)]: { hash: 'b'.repeat(64), level: 2, chars: 96 } }
+    const receipt = {
+      ['a'.repeat(64)]: { hash: 'b'.repeat(64), level: 2, chars: 96 },
+      ['c'.repeat(64)]: { hash: 'd'.repeat(64), level: 1, chars: 0, schemaChars: 4871, guidelines: true },
+    }
     s1.set('k1', { threadId: 'thread-abc', needsToolSpecs: true, toolCoverage: receipt })
     s1.set('k2', { threadId: 'thread-def' })
     // persist is debounced — wait for the write
