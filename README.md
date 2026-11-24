@@ -222,12 +222,13 @@ A few plugin options tune request handling (`magpie plugin options aws-quick '{â
   and parsed back into standard `tool_calls`; `tool`-role results render as
   `[tool_result â€¦]` continuing the same thread. Quick keeps tool definitions in thread history.
   The adapter tracks which descriptions and schemas have reached Quick. A later
-  turn spends up to 8 KiB of encoded text on missing details. Schemas take
-  priority. A shortened description resumes at its first missing character,
-  and a changed description replaces the earlier one. Large schemas can span
-  several turns. Lifting a forced choice restores access to the other tools
-  using their previously supplied definitions. A required call can reserve
-  more than 8 KiB when its mandatory arguments need that space.
+  turn sends each missing parameter schema as one complete JSON value if it
+  fits alongside the current request, even when the schema exceeds 8 KiB.
+  Until then, Quick can use any outline it has received. A required call
+  reserves room for its mandatory arguments. Description updates share an 8 KiB
+  allowance per turn. A shortened description resumes at its first missing
+  character, and a changed description replaces the earlier one. Lifting a
+  forced choice restores access to tools using their previously supplied definitions.
   When a request needs shorter tool descriptions, parameter outlines, or omitted
   schemas, Magpie adds a note to the reply with the counts. For explicit JSON
   output, the note goes in the reasoning field so the document stays parseable.

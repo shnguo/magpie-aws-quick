@@ -199,7 +199,7 @@ test('lifting a forced choice restores availability while retaining known defini
   assert.equal(restored.toolNotice, '')
 })
 
-test('unseen large schemas and descriptions arrive once in byte-bounded updates', () => {
+test('a missing large schema arrives whole while descriptions continue within 8 KiB per turn', () => {
   const properties = Object.fromEntries(Array.from({ length: 450 }, (_, n) => ['field_' + n,
     { type: 'string', pattern: '^[文🍋"]+$', maxLength: n + 1 }]))
   const schema = { type: 'object', properties, required: ['field_449'] }
@@ -207,7 +207,7 @@ test('unseen large schemas and descriptions arrive once in byte-bounded updates'
   const original = [{ name: 'small' }, { name: 'large', parameters: schema, description }]
   let stats = {}
   buildToolPreamble(original, { type: 'function', function: { name: 'small' } }, { stats })
-  let json = '', docs = '', turns = 0
+  let docs = '', turns = 0
   while (stats.needsToolSpecs && turns++ < 25) {
     const previous = stats.toolCoverage
     stats = {}
@@ -215,14 +215,16 @@ test('unseen large schemas and descriptions arrive once in byte-bounded updates'
     const tools = [original[0], { ...original[1], parameters: turns % 2 ? schema : reordered }]
     const text = buildToolPreamble(tools, 'auto', { maxBytes: 60 * 1024, previous, stats })
     assert.ok(text.isWellFormed())
-    assert.ok(escapedBytes(text) <= 8192)
+    assert.ok(escapedBytes(text) <= 60 * 1024)
+    assert.doesNotMatch(text, /parameters JSON from offset/)
     assert.doesNotMatch(text, /- small\n  parameters:/)
-    if (turns === 1) assert.match(text, /field_449: string/)
-    const part = text.match(/^  parameters JSON from offset (\d+) of (\d+): (.+)$/m)
-    if (part) {
-      assert.equal(+part[1], json.length)
-      json += part[3]
+    const schemas = [...text.matchAll(/\n- large\n  parameters: (.+)/g)]
+    assert.equal(schemas.length, turns === 1 ? 1 : 0)
+    if (turns === 1) {
+      assert.ok(escapedBytes(schemas[0][1]) > 8 * 1024)
+      assert.deepEqual(JSON.parse(schemas[0][1]), schema)
     }
+    assert.ok(escapedBytes(text.replace(/\n- large\n  parameters: .+/, '')) <= 8 * 1024)
     const doc = text.match(/\n  description( continued)?: ([\s\S]*)$/)
     if (doc) {
       assert.equal(Boolean(doc[1]), Boolean(docs))
@@ -230,9 +232,48 @@ test('unseen large schemas and descriptions arrive once in byte-bounded updates'
     }
   }
   assert.equal(stats.needsToolSpecs, false)
-  assert.deepEqual(JSON.parse(json), schema)
+  assert.ok(turns > 1)
   assert.equal(docs, description)
   assert.match(buildToolPreamble(original, 'auto', { previous: stats.toolCoverage }), /reminder/)
+})
+
+test('a schema that cannot fit keeps its outline and a legacy partial receipt retries it in full', () => {
+  const properties = Object.fromEntries(Array.from({ length: 500 }, (_, i) => ['field_' + i, { type: 'string' }]))
+  const parameters = { type: 'object', properties, required: ['field_499'] }
+  const catalog = createToolCatalog([{ name: 'large', parameters }, { name: 'small' }], 'auto')
+  const tight = {}, repeated = {}, roomy = {}
+  const first = catalog.render({ previous: {}, maxBytes: 9 * 1024, stats: tight })
+  assert.ok(escapedBytes(first) <= 9 * 1024)
+  assert.match(first, /- large\n  partial outline: \{field_499: string/)
+  assert.match(first, /- small\n  parameters: /)
+  assert.doesNotMatch(first, /- large\n  parameters/)
+  assert.equal(tight.needsToolSpecs, true)
+  const same = catalog.render({ previous: tight.toolCoverage, maxBytes: 9 * 1024, stats: repeated })
+  assert.match(same, /reminder/)
+  assert.doesNotMatch(same, /\n  (?:partial outline|parameters)/)
+  assert.equal(repeated.toolNotice, '')
+  assert.equal(repeated.needsToolSpecs, true)
+
+  const id = catalog.visible[0].id
+  const legacy = { ...repeated.toolCoverage, [id]: { ...repeated.toolCoverage[id], schemaChars: 4000 } }
+  const update = catalog.render({ previous: legacy, stats: roomy })
+  assert.deepEqual(JSON.parse(update.match(/- large\n  parameters: (.+)/)[1]), parameters)
+  assert.doesNotMatch(update, /parameters JSON from offset|- small\n  parameters/)
+  assert.equal(roomy.needsToolSpecs, false)
+})
+
+test('an optional schema whose outline exceeds the frame is announced by name once', () => {
+  const catalog = createToolCatalog([{ name: 'pick', parameters: { type: 'string', enum: ['x'.repeat(70 * 1024)] } }], 'auto')
+  const first = {}, later = {}
+  const text = catalog.render({ previous: {}, stats: first })
+  assert.match(text, /\n- pick$/)
+  assert.doesNotMatch(text, /\n  (?:parameters|partial outline)/)
+  assert.equal(first.toolNotice, 'Magpie omitted 1 parameter schema to fit this Quick request.')
+  assert.equal(first.needsToolSpecs, true)
+  const reminder = catalog.render({ previous: first.toolCoverage, stats: later })
+  assert.match(reminder, /Available: pick/)
+  assert.equal(later.toolNotice, '')
+  assert.equal(later.needsToolSpecs, true)
 })
 
 test('a mandatory argument outline can use the space its validated call requires', () => {
@@ -240,9 +281,20 @@ test('a mandatory argument outline can use the space its validated call requires
   const parameters = { type: 'object', properties: Object.fromEntries(keys.map(k => [k, { type: 'string' }])), required: keys }
   const catalog = createToolCatalog([{ name: 'publish', parameters }], 'required')
   assert.ok(catalog.minimumBytes > 8192)
-  const text = catalog.render({ previous: {}, maxBytes: catalog.minimumBytes })
+  const tight = {}
+  const text = catalog.render({ previous: {}, maxBytes: catalog.minimumBytes, stats: tight })
   assert.equal(escapedBytes(text), catalog.minimumBytes)
   assert.match(text, /required_field_699: string/)
+  const budget = escapedBytes(JSON.stringify(parameters)) + 512
+  const compact = {}, complete = {}
+  const full = catalog.render({ previous: tight.toolCoverage, maxBytes: budget, stats: compact })
+  assert.ok(escapedBytes(full) <= budget)
+  assert.deepEqual(JSON.parse(full.match(/- publish\n  parameters: (.+)/)[1]), parameters)
+  assert.doesNotMatch(full, /partial outline:/)
+  const next = catalog.render({ previous: compact.toolCoverage, stats: complete })
+  assert.match(next, /Guidelines:/)
+  assert.doesNotMatch(next, /\n  parameters:/)
+  assert.equal(complete.needsToolSpecs, false)
 })
 
 test('a description cleared during a minimum-size turn is explicitly replaced later', () => {

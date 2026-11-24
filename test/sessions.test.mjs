@@ -100,7 +100,7 @@ test('store TTL and LRU eviction', () => {
 })
 
 test('store persists to disk and a fresh instance resumes entries', async () => {
-  const { mkdtempSync, rmSync } = await import('node:fs')
+  const { mkdtempSync, readFileSync, rmSync, writeFileSync } = await import('node:fs')
   const { tmpdir } = await import('node:os')
   const path = await import('node:path')
   const dir = mkdtempSync(path.join(tmpdir(), 'magpie-sess-'))
@@ -109,12 +109,16 @@ test('store persists to disk and a fresh instance resumes entries', async () => 
     const s1 = createSessionStore({ file, ttlMs: 60_000 })
     const receipt = {
       ['a'.repeat(64)]: { hash: 'b'.repeat(64), level: 2, chars: 96 },
-      ['c'.repeat(64)]: { hash: 'd'.repeat(64), level: 1, chars: 0, schemaChars: 4871, guidelines: true },
+      ['c'.repeat(64)]: { hash: 'd'.repeat(64), level: 1, chars: 96, guidelines: true },
     }
     s1.set('k1', { threadId: 'thread-abc', needsToolSpecs: true, toolCoverage: receipt })
     s1.set('k2', { threadId: 'thread-def' })
     // persist is debounced — wait for the write
     await new Promise((r) => setTimeout(r, 400))
+    // Older plugins saved an offset into an incomplete schema alongside the description cursor.
+    const legacy = JSON.parse(readFileSync(file, 'utf8'))
+    legacy.entries.k1.toolCoverage['c'.repeat(64)].schemaChars = 4871
+    writeFileSync(file, JSON.stringify(legacy))
     const s2 = createSessionStore({ file, ttlMs: 60_000 })
     const first = s2.take('k1')
     assert.equal(first?.threadId, 'thread-abc')

@@ -261,8 +261,12 @@ test('fresh and retried Quick threads preserve the complete user turn and plan f
     assert.equal(fresh.threadId, continuation.threadId)
     assert.notEqual(retried.threadId, fresh.threadId)
     const catalog = continuation.payload.text.slice(0, -('\n\n' + user.content).length)
-    assert.ok(escapedBytes(catalog) <= 8 * 1024)
-    assert.match(catalog, /\n  (?:parameters|description continued):/)
+    const schemas = /\n- (\w+)\n  parameters: (.+)/g
+    for (const [, name, json] of catalog.matchAll(schemas)) {
+      assert.deepEqual(JSON.parse(json), tools.find(tool => tool.name === name).parameters)
+    }
+    assert.ok(escapedBytes(catalog.replace(schemas, '')) <= 8 * 1024)
+    assert.match(catalog, /\n  description continued:/)
     assert.ok(continuation.payload.text.endsWith(user.content))
     assert.ok(frameBytes(continuation.threadId, continuation.payload) <= UPSTREAM_TEXT_LIMIT)
     for (const { threadId, payload } of [fresh, retried]) {
@@ -327,10 +331,13 @@ test('streaming and JSON return one catalog notice, preserve tool calls, and reu
       const followup = await handleChatCompletions({ body: { tools, messages: [user, message,
         { role: 'tool', tool_call_id: call.id, content: 'done' }, { role: 'user', content: 'continue' }] }, outpostMgr: mgr, sessions })
       assert.equal((await followup.json()).choices[0].message.content, 'Ready')
-      assert.equal(f.state.userMessages.at(-1).threadId, first.threadId)
-      const update = f.state.userMessages.at(-1).payload.text.split('\n\n[tool_result')[0]
-      assert.ok(escapedBytes(update) <= 8 * 1024)
-      assert.match(update, /\n  parameters(?: JSON from offset \d+ of \d+)?:/)
+      const { threadId, payload } = f.state.userMessages.at(-1)
+      assert.equal(threadId, first.threadId)
+      const update = payload.text.split('\n\n[tool_result')[0]
+      const schema = update.match(/- inspect\n  parameters: (.+)/)?.[1]
+      assert.ok(schema && escapedBytes(schema) > 8 * 1024)
+      assert.deepEqual(JSON.parse(schema), tools[0].parameters)
+      assert.ok(frameBytes(threadId, payload) <= UPSTREAM_TEXT_LIMIT)
     }
   } finally { await f.close() }
 })
@@ -369,19 +376,27 @@ test('an oversized optional-tool turn keeps a call format and retries missing sc
   const sessions = createSessionStore()
   const tools = [{ name: 'lookup', parameters: {
     type: 'object', properties: { query: { type: 'string' } }, required: ['query'],
-  } }]
+  } }, { name: 'another_optional_tool_with_a_longer_name' }]
   const user = { role: 'user', content: 'x'.repeat(65 * 1024) + 'Keep this final question?' }
   const first = await req({ messages: [user], tools }, { sessions })
   const reply = (await first.json()).choices[0].message
-  const next = await req({ messages: [user, reply, { role: 'user', content: 'Look up the answer.' }], tools }, { sessions })
+  const history = [user, reply, { role: 'user', content: 'Look up the answer.' }]
+  const next = await req({ messages: history, tools }, { sessions })
   assert.equal(next.status, 200)
-  await next.json()
-  const [opening, followup] = fake.state.userMessages.slice(-2)
+  const nextReply = (await next.json()).choices[0].message
+  const last = await req({ messages: [...history, nextReply, user], tools }, { sessions })
+  assert.equal(last.status, 200)
+  await last.json()
+  const [opening, followup, reminder] = fake.state.userMessages.slice(-3)
   assert.equal(opening.threadId, followup.threadId)
-  assert.ok(opening.payload.text.endsWith('Keep this final question?'))
-  assert.match(opening.payload.text, /<tool_call>/)
-  assert.match(opening.payload.text, /- lookup/)
-  assert.doesNotMatch(opening.payload.text, /"required":\["query"\]/)
+  assert.equal(reminder.threadId, followup.threadId)
+  for (const { threadId, payload } of [opening, reminder]) {
+    assert.ok(payload.text.endsWith('Keep this final question?'))
+    assert.ok(payload.text.includes('<tool_call>{"name":"<tool_name>","arguments":{}}</tool_call>'))
+    assert.match(payload.text, /- lookup/)
+    assert.doesNotMatch(payload.text, /"required":\["query"\]/)
+    assert.ok(frameBytes(threadId, payload) <= UPSTREAM_TEXT_LIMIT)
+  }
   assert.match(followup.payload.text, /"required":\["query"\]/)
 })
 
