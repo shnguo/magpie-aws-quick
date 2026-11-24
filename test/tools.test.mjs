@@ -157,6 +157,20 @@ test('tool scope is stable across key order, top-level descriptions and choice b
   assert.notDeepEqual(catalog.contracts, createToolCatalog([{ name: 'empty' }, { ...b, parameters: { type: 'string', maxLength: 61 } }], 'auto').contracts)
 })
 
+test('lifting a forced choice advertises previously known hidden tools again', () => {
+  const tools = normalizeTools([{ name: 'read' }, { name: 'write' }])
+  const complete = {}, forced = {}, restored = {}
+  buildToolPreamble(tools, 'auto', { stats: complete })
+  const limited = buildToolPreamble(tools, { type: 'function', function: { name: 'read' } }, { previous: complete.toolCoverage, stats: forced })
+  assert.equal(complete.needsToolSpecs, false)
+  assert.equal(forced.needsToolSpecs, true)
+  assert.doesNotMatch(limited, /- write/)
+  const expanded = buildToolPreamble(tools, 'auto', { previous: forced.toolCoverage, stats: restored })
+  assert.match(expanded, /- write\n  parameters:/)
+  assert.doesNotMatch(expanded, /- read/)
+  assert.equal(restored.needsToolSpecs, false)
+})
+
 test('streaming preserves Markdown examples and literal tags while extracting the real call', () => {
   const call = '<tool_call>{"name":"Read","arguments":{"q":"` </tool_call> and <tool_call>"}}</tool_call>'
   const prose = [
