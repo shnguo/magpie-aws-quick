@@ -122,7 +122,7 @@ Inner JSON looks like `{"type": "…", "payload": {…}}`. Common types:
   "payload": {
     "thread_id": "<client-chosen id, e.g. uuid>",
     "text": "<the whole user input>",
-    "system_prompt": "<optional per-turn system override>",  // verified live
+    "system_prompt": "<per-turn persona override; its content is NOT recalled — see §5>",
     "custom_prompt": "<optional per-turn instruction>",       // verified live
     "message_id": "<uuid>",
     "agent_mode": "fast|balanced|smart|advanced",
@@ -294,6 +294,8 @@ toolset are rejected at the WS handshake for desktop tokens.
 On the local outpost, Smart did not retrieve inventory labels placed in
 `system_prompt` in tests with 124 bytes and 40 KiB of instructions. It
 retrieved the first and final labels at both sizes from `custom_prompt`.
+Re-checked on direct (OAuth) sessions with two accounts, Smart and Fast:
+labels in `system_prompt` were recalled 0/8 times, in `custom_prompt` 8/8.
 The adapter uses that field for caller instructions and keeps the persona
 override short. A permission review must fit its entire policy and transcript
 into the same frame.

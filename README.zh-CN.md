@@ -10,6 +10,9 @@
 > 工具调用、跨轮复用 Quick 会话、中断和大文件写入都做过端到端测试；pi 发的会话亲和头会用来持续复用同一个
 > Quick 会话。其他客户端也能用，只是测得少一些。
 
+> **想直接用 Quick 原生桌面端？** 推荐 [aws-quick-manager](https://github.com/httpdone/aws-quick-manager)：
+> 在官方 Quick 客户端里一键切换账号，通过 Quick 的云端接口在账号之间转移会话，不需要反向代理。
+
 > ⚠️ 仅供个人使用自己的账号。这是驱动 Amazon Quick 桌面客户端的内部双向 WebSocket 协议
 > （非公开 API），很可能违反 AWS 服务条款，账号存在被限制/封禁的风险，后果自负。
 
@@ -75,16 +78,21 @@ Quick 在服务端按 `thread_id` 保存会话历史，而 OpenAI 客户端每�
 
 层级顺序很重要：内容匹配命中永远优先，会话键只在前两级都失败时启用。
 
-- **scope 隔离** —— 哈希链按 `H(账号, agent_mode, thinking_effort,
-  system prompt, 工具名及精简后的参数 schema)` 命名空间隔离：换账号、换模型、换推理强度、
-  改 system prompt、工具名或参数结构，都会新建 thread。工具描述和单轮调用选项
-  可以在同一 thread 中更新；指定某个工具时，当轮只提供该工具。
+- **scope 隔离** —— 哈希链按 `H(账号, agent_mode, system prompt)` 命名空间
+  隔离：换账号、换模型或改 system prompt，都会透明地新建 thread，而不是续接到
+  一个不匹配的旧会话。调整思考强度、工具描述或当轮工具选择时沿用原 thread。
+  Claude Code 通过 ToolSearch 等方式新增工具时，插件按需补发定义。移除已声明的
+  工具或更改其参数结构时新建 thread。指定工具只限制当轮，其他工具的发送进度会保留。
+- **失败不丢 thread** —— 复用的这一轮出错或被取消（499、内容过滤、空闲超时）时，
+  原 thread 会放回缓存，下一次请求照样续接。会话键兜底只在新的工具结果对应的是
+  这个 thread 发出的调用时才续接，共用同一个会话 ID 的并行子代理不会串到彼此的
+  thread 上。
 - **编辑/分叉检测** —— 更早消息的任何改动都会改变哈希，所以被编辑或
   分叉的历史永远不会误续接；只有纯追加的尾部才合格。缓存条目使用即
   销毁（single-use），客户端重试也不会重放一个 turn。
 - **有界内存** —— 条目空闲 24 小时过期（agent 会话的轮次间隔远超半小时），
   LRU 上限 200 个 thread。缓存持久化到 `thread-sessions.json`（只存哈希 +
-  thread id、已发送工具定义的哈希、完整程度和长度），插件重载后仍可续接；命中过期 thread 是安全的：
+  thread id、待回复的调用 id、参数结构哈希和工具定义的发送进度），插件重载后仍可续接；命中过期 thread 是安全的：
   handler 会用完整 transcript 自动重试一次新 thread。
 
 ### 模型：agent_mode，不是模型 id
@@ -180,6 +188,12 @@ magpie login aws-quick              # 按提示选择登录方式
 - `stableDeviceId`（默认 `true`）：直连会话把按账号固定的设备 ID 作为
   `outpostId` 发送（见上文"设备 ID"）；`false` 改发空值。
 
+## 常见问题
+
+**登录第二个账号后，第一个账号失效了。**
+多半是在同一个浏览器里先退出了第一个账号，再登录第二个。退出登录会吊销第一个账号的凭证，插件就无法再刷新它。
+请换一个浏览器，或者用无痕窗口登录另一个账号，不要在浏览器里退出已经添加的账号。
+
 ## 已知限制
 
 - **工具调用是文本约定模拟**：Quick 的 agent 在服务端自带工具链（浏览器、本地文件、MCP 等），
@@ -203,8 +217,9 @@ magpie login aws-quick              # 按提示选择登录方式
   内联数据）会通过 Quick 自己的附件上传流程传到账号的云端会话工作区——
   和 Quick 应用里附加文件是同一个位置。远程 URL 和非图片文件
   （`file`/`input_file`）仍不支持；上传失败时会在消息里注明图片缺失。
-  云端上传需要直连会话（OAuth / 凭据管理器登录）；本地 outpost 回退路径
-  仍只支持内联。
+  云端上传在直连会话（OAuth / 凭据管理器登录）和本地 outpost 回退路径上
+  都可用：outpost 的 `sncs-session` 同样提供上传所需的 `id_token` /
+  `ws_host`（已实测）。
 - **采样参数**：`temperature` 等不在协议内，传了也会被服务端忽略（`capabilities.temperature:false`）。
 - **会话与账号绑定**：thread 复用的 scope 里包含账号身份哈希；换号后旧 thread 自动失效重建。
 - **多窗口/并发**：同一 QuickSocket 上不同 thread 可并行 turn；同一 thread 的并发请求会被拒绝（`busy`）。

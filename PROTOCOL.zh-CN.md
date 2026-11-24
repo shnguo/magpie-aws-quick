@@ -119,7 +119,7 @@ inner JSON 形如 `{"type": "…", "payload": {…}}`。常用类型：
   "payload": {
     "thread_id": "<client-chosen id, e.g. uuid>",
     "text": "<整条用户输入>",
-    "system_prompt": "<可选的逐轮 system 覆盖>",        // 已实测生效
+    "system_prompt": "<逐轮人设覆盖；内容读不到，见 §5>",
     "custom_prompt": "<可选的逐轮指令>",                // 已实测生效
     "message_id": "<uuid>",
     "agent_mode": "fast|balanced|smart|advanced",
@@ -273,7 +273,9 @@ OpenAI `tool_calls`。
 
 本地 outpost 实测使用 Smart 时，指令长度为 124 字节和 40 KiB 两种情况下，
 模型都未能从 `system_prompt` 复述测试标签，改用 `custom_prompt` 后均能复述
-开头和末尾的两个标签。适配器使用后者传入调用方的指令，并保留简短的人设覆盖。
+开头和末尾的两个标签。在直连（OAuth）会话上用两个账号、Smart 和 Fast 复测：
+放在 `system_prompt` 里的标签 8 次都没读到，放在 `custom_prompt` 里 8 次全对。
+适配器使用后者传入调用方的指令，并保留简短的人设覆盖。
 权限审核要求完整策略和待审记录能放进同一帧。
 
 ## 6. 已知坑

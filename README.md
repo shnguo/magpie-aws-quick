@@ -13,6 +13,10 @@ Gemini CLI, OpenCode, etc. — can use the models behind Quick
 > session-affinity headers are used to keep reusing the same Quick thread.
 > Other clients work too, but get less testing.
 
+> **Prefer the native Quick desktop app?** [aws-quick-manager](https://github.com/httpdone/aws-quick-manager)
+> switches accounts in the official Quick app in one click and copies chat
+> sessions between accounts through Quick's cloud API, with no reverse proxy.
+
 > ⚠️ For personal use with your own account only. This drives the desktop
 > client's internal bidirectional WebSocket protocol (not a public API) and
 > very likely violates AWS terms of service; your account may be limited or
@@ -91,10 +95,18 @@ continuations through three tiers, most precise first:
 Tier order matters: verified content matches always win; the session key
 is only used when both content tiers fail.
 - **Scope isolation** — the chain is namespaced by
-  `H(account, agent_mode, thinking_effort, system prompt, tool names and slimmed parameter schemas)`:
-  changes to these inputs start a fresh thread. Updated tool descriptions and
-  per-turn choices reuse the thread. A named choice advertises only that tool
-  for the current turn.
+  `H(account, agent_mode, system prompt)`: switching accounts, models or
+  system prompt starts a fresh thread rather than resuming a stale one.
+  The same thread supports changes in thinking effort, tool descriptions,
+  and per-turn tool choice. New tools, including those loaded by Claude Code's
+  ToolSearch, get their missing definitions incrementally. Removing a declared
+  tool or changing its parameter contract starts a fresh thread. A forced
+  choice limits the current turn and preserves the other tools' delivery records.
+- **Failure-safe** — a reused turn that errors or is cancelled (499, content
+  filter, idle timeout) puts its thread back, so the next request still
+  continues it. The session-key fallback only resumes when the new tool
+  results answer calls that thread made, so parallel subagents sharing one
+  session id never splice into each other's threads.
 - **Edit & branch detection** — any change to earlier messages alters the
   hashes, so edited or branched history can never silently continue a
   thread that doesn't match; only append-only tails qualify. Cached
@@ -103,7 +115,7 @@ is only used when both content tiers fail.
 - **Bounded memory** — entries expire after 24h idle (agent sessions pause
   far longer than that between turns) and the store is LRU-capped at 200
   threads. The cache persists to `thread-sessions.json` (hashes + thread
-  ids and tool coverage hashes, levels and lengths) so reuse survives plugin reloads; a stale hit is
+  ids, outstanding call ids, schema hashes and tool delivery progress) so reuse survives plugin reloads; a stale hit is
   safe — the handler retries once on a fresh thread with the full
   transcript.
 
@@ -212,6 +224,14 @@ A few plugin options tune request handling (`magpie plugin options aws-quick '{�
   per-account device id as `outpostId` (see Device ids above); `false` sends
   an empty value.
 
+## FAQ
+
+**After signing in to a second account, the first one stopped working.**
+You most likely signed out of the first account in the same browser before
+signing in to the second. Signing out revokes that account's credentials, so
+the plugin can no longer refresh it. Sign in each account in a different
+browser or in a private/incognito window, without signing out of the others.
+
 ## Known limitations
 
 - **Tool calls are a text-convention simulation**: Quick's agent owns a
@@ -246,8 +266,9 @@ A few plugin options tune request handling (`magpie plugin options aws-quick '{�
   workspace — the same place the Quick app puts them. Remote URLs and
   non-image files (`file`/`input_file` parts) are still unsupported; a
   failed upload falls back to a note telling the model the image is
-  missing. Cloud upload needs a direct session (OAuth / Credential Manager
-  sign-in); the local-outpost fallback stays inline-only.
+  missing. Cloud upload works on direct sessions (OAuth / Credential Manager
+  sign-in) and on the local-outpost fallback: outpost sessions carry the same
+  `id_token` / `ws_host`, which is all the upload flow needs (verified live).
 - **Sampling params**: `temperature` etc. don't exist in the protocol and are
   ignored server-side (`capabilities.temperature:false`).
 - **Sessions are account-bound**: the thread-reuse scope includes an account

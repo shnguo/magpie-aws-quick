@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { normalizeTools, buildToolPreamble, createToolCatalog, createToolCallParser, slimSchema } from '../lib/tools.mjs'
+import { normalizeTools, buildToolPreamble, createToolCatalog, createToolCallParser, createSourcesStripper, slimSchema } from '../lib/tools.mjs'
 import { escapedBytes } from '../lib/translate.mjs'
 
 test('normalizeTools keeps only named function tools', () => {
@@ -364,7 +364,7 @@ test('parser drops unterminated block without leaking it', () => {
   p.push('text <tool_call>{"name":"x"')
   const end = p.end()
   assert.equal(end.text, '')
-  assert.equal(end.dropped, true)
+  assert.equal(end.dropped, 'unterminated')
 })
 
 test('parser tolerates arguments as JSON string and missing args', () => {
@@ -381,7 +381,7 @@ test('parser ignores malformed JSON blocks', () => {
   assert.equal(r.calls.length, 0)
   assert.equal(r.text, 'ok')
   const end = p.end()
-  assert.equal(end.dropped, true) // malformed block counts as dropped
+  assert.equal(end.dropped, 'invalid') // malformed block counts as dropped
 })
 
 test('parser recovers a call wrapped in stray markup (</invoke>, code fence)', () => {
@@ -395,5 +395,35 @@ test('parser recovers a call wrapped in stray markup (</invoke>, code fence)', (
   // still rejects real garbage
   const q = createToolCallParser()
   q.push('<tool_call>{"name":"Bash","arguments":{"command":"echo</tool_call>')
-  assert.equal(q.end().dropped, true)
+  assert.equal(q.end().dropped, 'invalid')
+})
+
+test('parser repairs raw newlines and tabs inside string values', () => {
+  const p = createToolCallParser()
+  const r = p.push('<tool_call>{"name":"Write","arguments":{"file_path":"a.py","content":"def f():\n\treturn \\"x\\"\n"}}</tool_call>')
+  assert.equal(r.calls.length, 1)
+  assert.equal(r.calls[0].arguments.content, 'def f():\n\treturn "x"\n')
+  assert.equal(p.end().dropped, undefined)
+})
+
+test('sources stripper drops only citation-only blocks outside code; XML <sources> survives', () => {
+  const run = (text, step = 1) => {
+    const st = createSourcesStripper()
+    let out = ''
+    for (let i = 0; i < text.length; i += step) out += st.push(text.slice(i, i + step))
+    return out + st.end()
+  }
+  // citation-only blocks go, split across deltas or not
+  assert.equal(run('Done.\n<sources> [numeric tool args](mem://d5e9) </sources>\n\nNext <option>'), 'Done.\n\n\nNext <option>')
+  assert.equal(run('a<sources>[x](mem://1), [y](https://e.com/p)</sources>b', 3), 'ab')
+  // a real XML <sources> element survives
+  const maven = '<sources>\n  <source>src/gen/java</source>\n</sources>'
+  assert.equal(run(`Add:\n${maven}\n`), `Add:\n${maven}\n`)
+  // even a citation-shaped block is kept inside a code fence
+  const fenced = '```md\n<sources>[x](mem://1)</sources>\n```\nafter<sources>[y](mem://2)</sources>'
+  assert.equal(run(fenced), '```md\n<sources>[x](mem://1)</sources>\n```\nafter')
+  // unclosed / oversized blocks pass through verbatim
+  assert.equal(run('a <sources>never closed'), 'a <sources>never closed')
+  const big = '<sources>' + 'x'.repeat(5000)
+  assert.equal(run(big, 97), big)
 })

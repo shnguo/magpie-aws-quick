@@ -1,7 +1,7 @@
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { startFakeQuick, defaultScript } from './helpers/fake-quick.mjs'
-import { PLAIN_TEXT_NOTE, TOOLS_STILL_APPLY, handleChatCompletions, handleModels } from '../lib/handler.mjs'
+import { PLAIN_TEXT_NOTE, TOOLS_STILL_APPLY, INVALID_CALL_TOOL, handleChatCompletions, handleModels } from '../lib/handler.mjs'
 import { createSessionStore, chainHashes, sessionScope } from '../lib/sessions.mjs'
 import { normalizeTools } from '../lib/tools.mjs'
 import { byteLen, escapedBytes, frameBytes, UPSTREAM_TEXT_LIMIT } from '../lib/translate.mjs'
@@ -141,12 +141,19 @@ test('inline images go to user_message.attachments and shrink the text budget', 
   assert.ok(p.text.includes('what is this?'))
 })
 
-test('images too big for the frame are skipped with a note, not sent', async () => {
+test('images too big for the frame that cannot be uploaded are skipped with a note, not sent', async () => {
   const img = 'Z'.repeat(80 * 1024)
-  await req({
-    model: 'fast',
-    messages: [{ role: 'user', content: [{ type: 'text', text: 'look' }, { type: 'image_url', image_url: { url: `data:image/png;base64,${img}` } }] }],
+  const calls = []
+  const res = await handleChatCompletions({
+    body: {
+      model: 'fast',
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'look' }, { type: 'image_url', image_url: { url: `data:image/png;base64,${img}` } }] }],
+    },
+    outpostMgr,
+    options: { identity: 'test-acct', log: () => {}, fetchImpl: uploadFetch(calls, { failUpload: true }) },
   })
+  await res.json()
+  assert.equal(calls.length, 1, 'upload was attempted (every backend uploads now)')
   const p = fake.state.userMessages.at(-1).payload
   assert.equal(p.attachments, undefined)
   assert.ok(p.text.includes('1 image(s) not delivered'))
@@ -492,6 +499,23 @@ test('resuming a thread saved with the old tool scope refreshes its definitions'
   const frame = fake.state.userMessages.at(-1)
   assert.equal(frame.threadId, threadId)
   assert.match(frame.payload.text, /"n":\{"type":"number"\}/)
+})
+
+test('a malformed forced call cannot satisfy the required choice with a placeholder', async () => {
+  const f = await startFakeQuick({ script: () => [
+    { type: 'text_delta', payload: { delta: '<tool_call>{"name":"Read","arguments":{</tool_call>' } },
+    { type: 'message_complete', payload: {} },
+  ] })
+  try {
+    const res = await handleChatCompletions({
+      body: { model: 'smart', messages: [{ role: 'user', content: 'Read the file' }], tools: [fnTool('Read')],
+        tool_choice: { type: 'function', function: { name: 'Read' } } },
+      outpostMgr: fakeMgr(f), sessions: createSessionStore(),
+    })
+    assert.equal(res.status, 502)
+    assert.match((await res.json()).error.message, /without the required client tool call/)
+    assert.equal(f.state.userMessages.length, 1)
+  } finally { await f.close() }
 })
 
 test('edited history starts a fresh thread', async () => {
@@ -955,9 +979,9 @@ test('failed image upload still answers 200 with a not-delivered note', async ()
   }
 })
 
-test('non-direct outpost keeps large images inline-only (no upload calls)', async () => {
+test('local outpost uploads large images too', async () => {
   const f = await startFakeQuick({})
-  let fetchCalls = 0
+  const calls = []
   try {
     const mgr = {
       ensure: async () => ({
@@ -968,14 +992,13 @@ test('non-direct outpost keeps large images inline-only (no upload calls)', asyn
     const res = await handleChatCompletions({
       body: { model: 'fast', messages: [bigImageMsg()] },
       outpostMgr: mgr,
-      options: { identity: 'no-upload-acct', fetchImpl: async () => { fetchCalls++; return j({}) } },
+      options: { identity: 'outpost-upload-acct', fetchImpl: uploadFetch(calls), log: () => {} },
     })
     assert.equal(res.status, 200)
     await res.json()
     const p = f.state.userMessages.at(-1).payload
-    assert.equal(p.attachments, undefined)
-    assert.ok(p.text.includes('1 image(s) not delivered'))
-    assert.equal(fetchCalls, 0, 'local-outpost path must not call the upload API')
+    assert.ok(calls.some((c) => c.url.includes('upload-attachment')), 'outpost session uploads through the cloud API')
+    assert.ok(!p.text.includes('not delivered'), p.text.slice(-200))
   } finally {
     await f.close()
   }
@@ -1462,4 +1485,178 @@ test('with client tools, custom_prompt keeps the model on its tools after the fo
   } finally {
     await f.close()
   }
+})
+
+test('<sources> citations are stripped; a broken <tool_call> is reported and restated on the next reused turn', async () => {
+  let calls = 0
+  const f = await startFakeQuick({
+    script: async (p) => {
+      calls++
+      if (calls === 1) {
+        return [
+          { type: 'text_delta', payload: { delta: 'Done.\n<sources> [x](mem://d5e9) </sou' } },
+          { type: 'text_delta', payload: { delta: 'rces>\nNext. <tool_call>{"name":"Bash","arguments":{"command":"echo</tool_call>' } },
+          { type: 'message_complete', payload: { text: '' } },
+        ]
+      }
+      return defaultScript(p)
+    },
+  })
+  const mgr = fakeMgr(f)
+  const sessions = createSessionStore()
+  const tools = [fnTool('Bash')]
+  const opts = { identity: 'dropped-call-acct' }
+  const convo1 = [{ role: 'user', content: 'run it' }]
+  try {
+    const r1 = await handleChatCompletions({ body: { model: 'fast', messages: convo1, tools }, outpostMgr: mgr, sessions, options: opts })
+    const j1 = await r1.json()
+    const content = j1.choices[0].message.content
+    assert.ok(!content.includes('<sources>') && !content.includes('mem://'), content)
+    assert.match(content, /Done\./)
+    // the broken call becomes a placeholder call so the client's loop keeps going
+    assert.equal(j1.choices[0].finish_reason, 'tool_calls')
+    const ph = j1.choices[0].message.tool_calls
+    assert.equal(ph.length, 1)
+    assert.equal(ph[0].function.name, INVALID_CALL_TOOL)
+    assert.deepEqual(JSON.parse(ph[0].function.arguments), { tool: 'Bash', reason: 'invalid' })
+
+    // client answers with its "no such tool" error, as Claude Code does
+    const convo2 = [
+      ...convo1,
+      { role: 'assistant', content, tool_calls: ph },
+      { role: 'tool', tool_call_id: ph[0].id, content: `Error: No such tool available: ${INVALID_CALL_TOOL}` },
+    ]
+    const r2 = await handleChatCompletions({ body: { model: 'fast', messages: convo2, tools }, outpostMgr: mgr, sessions, options: opts })
+    await r2.json()
+    const up2 = f.state.userMessages.at(-1)
+    assert.equal(up2.threadId, f.state.userMessages.at(-2).threadId, 'reused thread')
+    assert.match(up2.payload.text, /previous <tool_call> for Bash was not valid JSON, so the client never ran it/)
+    assert.ok(up2.payload.text.indexOf('[Note:') < up2.payload.text.indexOf('No such tool available'), 'note precedes the placeholder error')
+  } finally {
+    await f.close()
+  }
+})
+
+test('a reused turn cancelled by the client puts the thread back for the next request', async () => {
+  let calls = 0
+  const f = await startFakeQuick({
+    script: (p) => {
+      calls++
+      return calls === 2 ? [] : defaultScript(p) // turn 2 goes silent until aborted
+    },
+  })
+  const mgr = fakeMgr(f)
+  const sessions = createSessionStore()
+  const opts = { identity: 'restore-acct', idleTimeoutMs: 60_000 }
+  const u1 = { role: 'user', content: 'remember teal' }
+  try {
+    const r1 = await handleChatCompletions({ body: { model: 'fast', messages: [u1] }, outpostMgr: mgr, sessions, options: opts })
+    const reply = (await r1.json()).choices[0].message.content
+    const convo2 = [u1, { role: 'assistant', content: reply }, { role: 'user', content: 'what color?' }]
+
+    const ac = new AbortController()
+    const p2 = handleChatCompletions({ body: { model: 'fast', messages: convo2 }, outpostMgr: mgr, sessions, options: opts, signal: ac.signal })
+    await sleep(200)
+    ac.abort()
+    assert.equal((await p2).status, 499)
+
+    // client retries the same request: it must land on the original thread
+    const r3 = await handleChatCompletions({ body: { model: 'fast', messages: convo2 }, outpostMgr: mgr, sessions, options: opts })
+    assert.equal(r3.status, 200)
+    await r3.json()
+    const [t1, t2, t3] = f.state.userMessages.slice(-3)
+    assert.equal(t2.threadId, t1.threadId)
+    assert.equal(t3.threadId, t1.threadId, 'cancelled turn must not strand the thread')
+    assert.equal(t3.payload.text, 'what color?')
+  } finally {
+    await f.close()
+  }
+})
+
+test('a tool added mid-session or an effort change keeps the thread; only the new tool spec is sent', async () => {
+  const f = await startFakeQuick({})
+  const mgr = fakeMgr(f)
+  const sessions = createSessionStore()
+  const opts = { identity: 'toolset-acct' }
+  const u1 = { role: 'user', content: 'start' }
+  try {
+    const r1 = await handleChatCompletions({ body: { model: 'smart', reasoning_effort: 'high', tools: [fnTool('Read')], messages: [u1] }, outpostMgr: mgr, sessions, options: opts })
+    const a1 = (await r1.json()).choices[0].message.content
+    const convo2 = [u1, { role: 'assistant', content: a1 }, { role: 'user', content: 'next' }]
+    // ToolSearch-style: a new tool appears, and the effort changes
+    const r2 = await handleChatCompletions({ body: { model: 'smart', reasoning_effort: 'low', tools: [fnTool('Read'), fnTool('CronCreate')], messages: convo2 }, outpostMgr: mgr, sessions, options: opts })
+    const a2 = (await r2.json()).choices[0].message.content
+    const [t1, t2] = f.state.userMessages.slice(-2)
+    assert.equal(t2.threadId, t1.threadId, 'toolset/effort change must not start a new thread')
+    assert.match(t2.payload.text, /\[Client tool calling\][\s\S]*CronCreate/, 'full spec for the added tool')
+    assert.ok(!/"name":"Read"|### Read|- Read:/.test(t2.payload.text.split('[Client tool calling — reminder]')[0]), 'no full spec re-sent for Read')
+    assert.match(t2.payload.text, /reminder[\s\S]*Read, CronCreate/)
+
+    // a third turn with the same tools sends only the reminder
+    const convo3 = [...convo2, { role: 'assistant', content: a2 }, { role: 'user', content: 'again' }]
+    const r3 = await handleChatCompletions({ body: { model: 'smart', tools: [fnTool('Read'), fnTool('CronCreate')], messages: convo3 }, outpostMgr: mgr, sessions, options: opts })
+    await r3.json()
+    const t3 = f.state.userMessages.at(-1)
+    assert.equal(t3.threadId, t1.threadId)
+    assert.ok(!t3.payload.text.includes('[Client tool calling]\n'), 'no full spec once every tool is known')
+  } finally {
+    await f.close()
+  }
+})
+
+test('two native client calls in one step are both salvaged, even if the first result lands early', async () => {
+  const f = await startFakeQuick({
+    script: () => [
+      { type: 'tool_start', payload: { tool_name: 'Edit', tool_id: 'e1', arguments: {} } },
+      { type: 'tool_start', payload: { tool_name: 'Edit', tool_id: 'e2', arguments: {} } },
+      { type: 'tool_arguments', payload: { tool_id: 'e1', tool_name: 'Edit', arguments: { file_path: 'a.txt', content: 'A' } } },
+      // Quick rejects the first before the second's arguments arrive
+      { type: 'tool_result', payload: { tool_id: 'e1', tool_name: 'Edit', error: 'Unknown tool: Edit' } },
+      { type: 'tool_arguments', payload: { tool_id: 'e2', tool_name: 'Edit', arguments: { file_path: 'b.txt', content: 'B' } } },
+      { type: 'tool_result', payload: { tool_id: 'e2', tool_name: 'Edit', error: 'Unknown tool: Edit' } },
+      { type: 'text_delta', payload: { delta: 'rewritten as text' } },
+      { type: 'message_complete', payload: { text: 'rewritten as text' } },
+    ],
+  })
+  try {
+    const res = await handleChatCompletions({
+      body: { model: 'fast', messages: [{ role: 'user', content: 'edit both' }], tools: [fnTool('Edit')] },
+      outpostMgr: fakeMgr(f),
+      options: { identity: 'multi-salvage-acct' },
+    })
+    const j = await res.json()
+    const calls = j.choices[0].message.tool_calls.map((c) => JSON.parse(c.function.arguments).file_path)
+    assert.deepEqual(calls, ['a.txt', 'b.txt'])
+    assert.ok(!String(j.choices[0].message.content ?? '').includes('rewritten'), 'rewrite step is cut')
+  } finally {
+    await f.close()
+  }
+})
+
+test('session-key fallback does not splice one subagent\'s tool results into a sibling\'s thread', async () => {
+  // Subagents of one Claude Code session share the gateway session id and the
+  // system prompt; when a strict match misses (e.g. the request moved to
+  // another account and back), the id alone must not pick a sibling thread.
+  const sessions = createSessionStore()
+  const tools = [fnTool('Read')]
+  const call = (messages) => handleChatCompletions({
+    body: { model: 'fast', messages, tools },
+    outpostMgr: fakeMgr(fake),
+    sessions,
+    options: { identity: 'sub-acct', sessionKey: 'cc-session-1', log: () => {} },
+  })
+  // sibling subagent B answers last, so it owns the session-key entry
+  await (await call([{ role: 'user', content: 'agent A: read a.py' }])).json()
+  await (await call([{ role: 'user', content: 'agent B: read b.py' }])).json()
+  const before = fake.state.userMessages.length
+  // A's follow-up with a rewritten head (strict and fuzzy miss) carrying a
+  // result for a call id the B thread never made
+  const r = await call([
+    { role: 'user', content: 'agent A: read a.py (rewritten)' },
+    { role: 'assistant', content: '', tool_calls: [{ id: 'call_from_A', type: 'function', function: { name: 'Read', arguments: '{}' } }] },
+    { role: 'tool', tool_call_id: 'call_from_A', content: 'def parse_csv(): ...' },
+  ])
+  await r.json()
+  const [tB, tA2] = [fake.state.userMessages[before - 1], fake.state.userMessages[before]]
+  assert.notEqual(tA2.threadId, tB.threadId, 'must not resume the sibling thread')
 })
