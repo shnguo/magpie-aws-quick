@@ -113,19 +113,38 @@ test('tool descriptions, outlines and omitted validation detail can improve on a
   const short = buildToolPreamble(tools, 'auto', { maxBytes: 3500, stats: clipped })
   assert.match(short, /\[truncated\]/)
   assert.equal(clipped.needsToolSpecs, true)
+  assert.equal(clipped.toolNotice, 'Magpie shortened 1 tool description to fit this Quick request.')
   const repeated = {}
   const reminder = buildToolPreamble(tools, 'auto', { maxBytes: 3500, previous: clipped.toolCoverage, stats: repeated })
   assert.match(reminder, /reminder/)
   assert.equal(repeated.needsToolSpecs, true)
+  assert.equal(repeated.toolNotice, '')
   const complete = {}
   const upgraded = buildToolPreamble(tools, 'auto', { previous: repeated.toolCoverage, stats: complete })
   assert.ok(upgraded.includes(tools[0].description))
   assert.equal(complete.needsToolSpecs, false)
+  assert.equal(complete.toolNotice, '')
   const tight = {}
   const outline = buildToolPreamble(tools, 'required', { maxBytes: 500, stats: tight })
   assert.match(outline, /outline:/)
   for (const rule of ['"minItems":1', '"maxLength":60', '"pattern":"^[A-Z]"']) assert.ok(outline.includes(rule))
   assert.equal(tight.needsToolSpecs, true)
+  assert.equal(tight.toolNotice, 'Magpie shortened 1 tool description and sent 1 parameter schema as an outline to fit this Quick request.')
+})
+
+test('catalog notices distinguish outlines from missing schemas and clear on a full render', () => {
+  const properties = Object.fromEntries(Array.from({ length: 100 }, (_, i) => ['field_' + i, { type: 'string' }]))
+  const tools = normalizeTools(['one', 'two', 'three'].map(name => ({ name, parameters: { type: 'object', properties } })))
+  const catalog = createToolCatalog(tools, 'auto')
+  const stats = {}
+  const outlines = catalog.render({ maxBytes: 1000, stats })
+  assert.equal((outlines.match(/partial outline:/g) ?? []).length, 3)
+  assert.equal(stats.toolNotice, 'Magpie sent 3 parameter schemas as outlines to fit this Quick request.')
+  const names = catalog.render({ maxBytes: catalog.minimumBytes, stats })
+  assert.equal((names.match(/^- /gm) ?? []).length, 1)
+  assert.equal(stats.toolNotice, 'Magpie omitted 3 parameter schemas to fit this Quick request.')
+  catalog.render({ stats })
+  assert.equal(stats.toolNotice, '')
 })
 
 test('a fixed per-turn budget can finish clipped descriptions over multiple turns', () => {
@@ -164,11 +183,13 @@ test('lifting a forced choice advertises previously known hidden tools again', (
   const limited = buildToolPreamble(tools, { type: 'function', function: { name: 'read' } }, { previous: complete.toolCoverage, stats: forced })
   assert.equal(complete.needsToolSpecs, false)
   assert.equal(forced.needsToolSpecs, true)
+  assert.equal(forced.toolNotice, '')
   assert.doesNotMatch(limited, /- write/)
   const expanded = buildToolPreamble(tools, 'auto', { previous: forced.toolCoverage, stats: restored })
   assert.match(expanded, /- write\n  parameters:/)
   assert.doesNotMatch(expanded, /- read/)
   assert.equal(restored.needsToolSpecs, false)
+  assert.equal(restored.toolNotice, '')
 })
 
 test('streaming preserves Markdown examples and literal tags while extracting the real call', () => {

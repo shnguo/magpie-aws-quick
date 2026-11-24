@@ -254,7 +254,8 @@ test('fresh and retried Quick threads preserve the complete user turn and plan f
   }
   try {
     const reply = await send([system, user])
-    await send([system, user, reply, user])
+    const retriedReply = await send([system, user, reply, user])
+    assert.equal((retriedReply.content.match(/> Magpie /g) ?? []).length, 1)
     const [fresh, continuation, retried] = f.state.userMessages
     assert.equal(f.state.userMessages.length, 3)
     assert.equal(fresh.threadId, continuation.threadId)
@@ -282,6 +283,68 @@ test('fresh and retried Quick threads preserve the complete user turn and plan f
   } finally {
     await f.close()
   }
+})
+
+test('streaming and JSON return one catalog notice, preserve tool calls, and reuse the echoed reply', async () => {
+  const answer = 'The fourth finding is included.'
+  const toolCall = '<tool_call>{"name":"inspect","arguments":{"field_0":"ok"}}</tool_call>'
+  const f = await startFakeQuick({ script: p => [
+    { type: 'text_delta', payload: { delta: p.text.endsWith('continue') ? 'Ready' : answer + toolCall } },
+    { type: 'message_complete', payload: {} },
+  ] })
+  const properties = Object.fromEntries(Array.from({ length: 260 }, (_, i) => ['field_' + i, { type: 'string' }]))
+  const tools = [{ name: 'inspect', description: 'Directions. '.repeat(900), parameters: { type: 'object', properties, required: ['field_0'] } }]
+  const mgr = fakeMgr(f)
+  try {
+    for (const stream of [true, false]) {
+      const sessions = createSessionStore()
+      const user = { role: 'user', content: 'Q'.repeat(52 * 1024) }
+      const res = await handleChatCompletions({ body: { messages: [user], tools, stream }, outpostMgr: mgr, sessions })
+      assert.equal(res.status, 200)
+      let message, finish
+      if (stream) {
+        const events = await readSse(res)
+        assert.equal(events.at(-1).done, true)
+        const choices = events.flatMap(e => e.choices ?? [])
+        message = { role: 'assistant', content: choices.map(c => c.delta.content ?? '').join(''),
+          tool_calls: choices.flatMap(c => c.delta.tool_calls ?? []) }
+        finish = choices.at(-1).finish_reason
+      } else {
+        const [choice] = (await res.json()).choices
+        message = choice.message
+        finish = choice.finish_reason
+      }
+      assert.equal(message.content, answer + '\n\n> Magpie shortened 1 tool description and sent 1 parameter schema as an outline to fit this Quick request.')
+      assert.equal(finish, 'tool_calls')
+      assert.equal(message.tool_calls.length, 1)
+      const [call] = message.tool_calls
+      assert.equal(call.function.name, 'inspect')
+      assert.deepEqual(JSON.parse(call.function.arguments), { field_0: 'ok' })
+      const first = f.state.userMessages.at(-1)
+      assert.match(first.payload.text, /outline:/)
+      assert.doesNotMatch(first.payload.text, /> Magpie /)
+      const followup = await handleChatCompletions({ body: { tools, messages: [user, message,
+        { role: 'tool', tool_call_id: call.id, content: 'done' }, { role: 'user', content: 'continue' }] }, outpostMgr: mgr, sessions })
+      assert.equal((await followup.json()).choices[0].message.content, 'Ready')
+      assert.equal(f.state.userMessages.at(-1).threadId, first.threadId)
+      assert.ok(f.state.userMessages.at(-1).payload.text.includes(tools[0].description))
+    }
+  } finally { await f.close() }
+})
+
+test('explicit JSON output keeps the catalog notice separate from the document', async () => {
+  const f = await startFakeQuick({ script: () => [
+    { type: 'text_delta', payload: { delta: '{"ok":true}' } }, { type: 'message_complete', payload: {} },
+  ] })
+  try {
+    for (const type of ['json_object', 'json_schema']) {
+      const res = await handleChatCompletions({ body: { response_format: { type }, messages: [{ role: 'user', content: 'return JSON' }],
+        tools: [{ name: 'read', description: 'Long description. '.repeat(5000) }] }, outpostMgr: fakeMgr(f) })
+      const message = (await res.json()).choices[0].message
+      assert.deepEqual(JSON.parse(message.content), { ok: true })
+      assert.equal(message.reasoning_content, 'Magpie shortened 1 tool description to fit this Quick request.')
+    }
+  } finally { await f.close() }
 })
 
 test('a changed parameter on the same tool name sends the new schema on a fresh thread', async () => {

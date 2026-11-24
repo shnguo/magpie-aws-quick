@@ -224,6 +224,9 @@ A few plugin options tune request handling (`magpie plugin options aws-quick '{â
   The adapter tracks which descriptions and schemas have reached Quick. A later
   turn sends missing details or changed descriptions when space permits. A short
   reminder suffices while the available space would repeat the same material.
+  When a request needs shorter tool descriptions, parameter outlines, or omitted
+  schemas, Magpie adds a note to the reply with the counts. For explicit JSON
+  output, the note goes in the reasoning field so the document stays parseable.
   Inline and fenced Markdown examples of tool calls pass through as text.
   A required choice produces an error if Quick completes without the requested
   client call. If Quick invokes a client-declared tool through Quick's own native tool channel, the plugin recognizes the call and
