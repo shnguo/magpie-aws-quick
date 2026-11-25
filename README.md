@@ -129,8 +129,10 @@ concrete model (`resolved_model_id`/`served_model_id` in `turn_usage`):
 | `smart` | smart | `us.anthropic.claude-opus-5-5` |
 | `advanced` | advanced | (may normalize to smart) |
 
-The `X-Magpie-Effort` header (or body's `reasoning_effort`/`thinking_effort`)
-maps to `thinking_effort`: `off/low/medium/high/max`.
+The `X-Magpie-Effort` header, body `reasoning_effort` or body `thinking_effort`
+maps to `thinking_effort`: `off/low/medium/high/max`. They're checked in that
+order and the first recognized value wins, so an unrecognized header falls back
+to the body. Quick has nothing above `max`, so `xhigh` and `ultra` both send `max`.
 
 ## Install
 
