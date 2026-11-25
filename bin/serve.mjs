@@ -47,7 +47,11 @@ export function createProxyServer({ options = {}, token = '', outpostMgr, sessio
           res.writeHead(400, { 'content-type': 'application/json' })
           return res.end(JSON.stringify({ error: { message: 'request body must be JSON', type: 'invalid_request_error' } }))
         }
-        out = await handleChatCompletions({ body, outpostMgr, options, signal: ac.signal, sessions })
+        const effortHeader = req.headers['x-magpie-effort']
+        out = await handleChatCompletions({
+          body, outpostMgr, options, signal: ac.signal, sessions,
+          effortHeader: typeof effortHeader === 'string' ? effortHeader : undefined,
+        })
       } else {
         res.writeHead(404, { 'content-type': 'application/json' })
         return res.end(JSON.stringify({ error: { message: `not found: ${req.method} ${path}`, type: 'invalid_request_error' } }))

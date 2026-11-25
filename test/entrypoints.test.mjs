@@ -98,3 +98,39 @@ test('plugin fetch sends high, xhigh, max and ultra to Quick as thinking_effort'
   assert.equal(first.sent.payload.thinking_effort, 'high')
   assert.equal(second.sent.payload.thinking_effort, 'max')
 })
+
+test('standalone HTTP sends X-Magpie-Effort to Quick ahead of the body fields', async t => {
+  const { outpostMgr, sessions, fake } = await startChatFixture(t)
+  const server = createProxyServer({ outpostMgr, sessions })
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  t.after(() => new Promise(resolve => server.close(resolve)))
+  const url = `http://127.0.0.1:${server.address().port}/v1/chat/completions`
+  // what the user_message frame carried: the level, or 'absent' without the key
+  async function effortSent(text, { header, ...fields }) {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-magpie-effort': header },
+      body: JSON.stringify({ messages: [{ role: 'user', content: text }], ...fields }),
+    })
+    assert.equal(response.status, 200)
+    await response.json()
+    const { payload } = fake.state.userMessages.at(-1)
+    return Object.hasOwn(payload, 'thinking_effort') ? payload.thinking_effort : 'absent'
+  }
+
+  const cases = [
+    ['high header', { header: 'high' }, 'high'],
+    ['xhigh header', { header: 'xhigh' }, 'max'],
+    ['max header', { header: 'max' }, 'max'],
+    ['ultra header', { header: 'ultra' }, 'max'],
+    // The header wins over a conflicting body value...
+    ['ultra header, low reasoning_effort', { header: 'ultra', reasoning_effort: 'low' }, 'max'],
+    ['ultra header, low thinking_effort', { header: 'ultra', thinking_effort: 'low' }, 'max'],
+    // ...and an unrecognized header still falls back to the body.
+    ['turbo header, high reasoning_effort', { header: 'turbo', reasoning_effort: 'high' }, 'high'],
+  ]
+  const sent = {}
+  for (const [name, request] of cases) sent[name] = await effortSent(name, request)
+  assert.deepEqual(sent, Object.fromEntries(cases.map(([name, , wire]) => [name, wire])))
+})
