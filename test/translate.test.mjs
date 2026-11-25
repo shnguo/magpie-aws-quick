@@ -48,9 +48,33 @@ test('effortFor maps header/body spellings to quick levels', () => {
   assert.equal(effortFor(undefined, { reasoning_effort: 'low' }), 'low')
   assert.equal(effortFor(undefined, { thinking_effort: 'max' }), 'max')
   assert.equal(effortFor('xhigh', {}), 'max')
+  assert.equal(effortFor('ultra', {}), 'max')
+  assert.equal(effortFor(' ULTRA ', {}), 'max')
   assert.equal(effortFor('none', {}), 'off')
+  for (const [alias, level] of [['minimal', 'low'], ['med', 'medium'], ['enabled', 'high'], ['true', 'high'], ['disabled', 'off'], ['false', 'off']]) {
+    assert.equal(effortFor(alias, {}), level, alias)
+  }
   assert.equal(effortFor('bogus', {}), undefined)
   assert.equal(effortFor(undefined, {}), undefined)
+})
+
+test('effortFor falls back past an unrecognized header or reasoning_effort', () => {
+  assert.equal(effortFor('turbo', { reasoning_effort: 'high' }), 'high')
+  assert.equal(effortFor('', { reasoning_effort: 'medium' }), 'medium')
+  assert.equal(effortFor('turbo', { reasoning_effort: 'bogus', thinking_effort: 'ultra' }), 'max')
+  assert.equal(effortFor(undefined, { reasoning_effort: 7, thinking_effort: 'low' }), 'low')
+  // the first recognized value still wins
+  assert.equal(effortFor('low', { reasoning_effort: 'high' }), 'low')
+  assert.equal(effortFor(undefined, { reasoning_effort: 'high', thinking_effort: 'off' }), 'high')
+  assert.equal(effortFor('turbo', { reasoning_effort: 'bogus' }), undefined)
+})
+
+test('effortFor never returns Object.prototype members', () => {
+  // the lowercase names Object.prototype has; a plain-object lookup returned them
+  for (const name of ['__proto__', 'constructor']) {
+    assert.equal(effortFor(name, {}), undefined, name)
+    assert.equal(effortFor(name, { reasoning_effort: 'low' }), 'low', name)
+  }
 })
 
 test('renderTranscript: system + history + raw final user turn', () => {

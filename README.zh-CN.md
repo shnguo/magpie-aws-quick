@@ -104,8 +104,9 @@ Quick 的 `user_message` 用 `agent_mode` 选择档位，服务端再路由到�
 | `smart` | smart | `us.anthropic.claude-opus-5-5` |
 | `advanced` | advanced | （服务端可能归一到 smart） |
 
-`X-Magpie-Effort` 头（或 body 的 `reasoning_effort`/`thinking_effort`）映射到
-`thinking_effort`：`off/low/medium/high/max`。
+`X-Magpie-Effort` 头、body 的 `reasoning_effort` 或 `thinking_effort` 映射到
+`thinking_effort`：`off/low/medium/high/max`。三者按此顺序检查，取第一个能识别的值，
+所以无法识别的头会回退到 body。Quick 没有高于 `max` 的档位，`xhigh` 和 `ultra` 都发送 `max`。
 
 ## 安装
 
