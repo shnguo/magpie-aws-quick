@@ -52,7 +52,7 @@ import { createSessionStore, SESSION_DEFAULTS } from './lib/sessions.mjs'
 import { MODELS } from './lib/translate.mjs'
 import {
   createSessionStore as createOAuthStore, createDirectBackend,
-  startOAuthLogin, takeDiscovery, keyForSession, OAuthError, defaultStoreDir, oauthDeviceId, isDeviceId,
+  startOAuthLogin, takeDiscovery, keyForSession, accountIdentity, OAuthError, defaultStoreDir, oauthDeviceId, isDeviceId,
 } from './lib/oauth.mjs'
 import { createCredManBackend, loadCredManSession, credManDeviceId } from './lib/credman.mjs'
 import { quickUsage } from './lib/usage.mjs'
@@ -209,8 +209,8 @@ export const AwsQuickAuthPlugin = async (_input, options) => {
     // Re-login to the same account keeps its device id; a new account gets one.
     const prev = store.get(key)?.device_id
     store.set(key, { ...sess, device_id: isDeviceId(prev) ? prev : sess.device_id || randomUUID() })
-    const who = sess.email || sess.display_name || sess.aws_account_id || ''
-    return { type: 'success', key, metadata: { mode: 'oauth', account: who } }
+    const id = accountIdentity(sess, key)
+    return { type: 'success', key, ...(id.accountId ? { accountId: id.accountId } : {}), metadata: { mode: 'oauth', ...id.metadata } }
   }
   const startOAuthOpts = (signal, extra = {}) => ({
     stage: opts.buildStage || 'prod',
@@ -360,8 +360,9 @@ export const AwsQuickAuthPlugin = async (_input, options) => {
                   // expired token triggers OIDC refresh + credman write-back.
                   const backend = createCredManBackend({ fetchImpl: opts.fetchImpl, log: opts.log })
                   await backend.session()
-                  const who = sess.email || sess.display_name || sess.aws_account_id || ''
-                  return { type: 'success', key: 'aws-quick-local', metadata: { mode: 'local-credman', account: who } }
+                  // No per-account key here, so only an email may identify the account.
+                  const id = accountIdentity(sess)
+                  return { type: 'success', key: 'aws-quick-local', ...(id.accountId ? { accountId: id.accountId } : {}), metadata: { mode: 'local-credman', ...id.metadata } }
                 }
               } catch {}
             }
