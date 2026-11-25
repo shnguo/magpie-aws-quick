@@ -406,7 +406,7 @@ test('parser repairs raw newlines and tabs inside string values', () => {
   assert.equal(p.end().dropped, undefined)
 })
 
-test('sources stripper drops only citation-only blocks outside code; XML <sources> survives', () => {
+test('sources stripper drops citation links and empty footers while preserving literal XML', () => {
   const run = (text, step = 1) => {
     const st = createSourcesStripper()
     let out = ''
@@ -416,6 +416,18 @@ test('sources stripper drops only citation-only blocks outside code; XML <source
   // citation-only blocks go, split across deltas or not
   assert.equal(run('Done.\n<sources> [numeric tool args](mem://d5e9) </sources>\n\nNext <option>'), 'Done.\n\n\nNext <option>')
   assert.equal(run('a<sources>[x](mem://1), [y](https://e.com/p)</sources>b', 3), 'ab')
+  for (const step of [1, 7, 128]) {
+    assert.equal(run('Done.\n\n<sources>\n</sources>', step), 'Done.')
+    assert.equal(run('Done.\r\n\r\n<sources> \t\r\n</sources>\r\n', step), 'Done.')
+    assert.equal(run('Done.\n<sources></sources>', step), 'Done.')
+    for (const literal of [
+      'Write <sources></sources>',
+      '<config>\n<sources></sources>\n</config>',
+      'Example:\n```xml\n<sources>\n</sources>\n```\n',
+      'Example:\n<sources>\n',
+      'Done.\n\n',
+    ]) assert.equal(run(literal, step), literal)
+  }
   // a real XML <sources> element survives
   const maven = '<sources>\n  <source>src/gen/java</source>\n</sources>'
   assert.equal(run(`Add:\n${maven}\n`), `Add:\n${maven}\n`)

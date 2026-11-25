@@ -1518,6 +1518,26 @@ test('with client tools, custom_prompt keeps the model on its tools after the fo
   }
 })
 
+for (const stream of [true, false]) {
+  const transport = stream ? 'streamed deltas' : 'a full-message fallback'
+  test('empty sources footer is removed from ' + transport, async (t) => {
+    const answer = 'The reply is ready.\n\nAll 30 tests passed.'
+    const parts = [answer, '\n\n<so', 'urces>\n</sou', 'rces>']
+    const complete = { type: 'message_complete', payload: { text: parts.join('') } }
+    const { request } = await startChatFixture(t, {
+      script: () => stream
+        ? [...parts.map(delta => ({ type: 'text_delta', payload: { delta } })), complete]
+        : [complete],
+    })
+    const res = await request({ model: 'smart', stream, messages: [{ role: 'user', content: 'Report the result.' }] })
+    assert.equal(res.status, 200)
+    const text = stream
+      ? (await readSse(res)).map(event => event.choices?.[0]?.delta?.content ?? '').join('')
+      : (await res.json()).choices[0].message.content
+    assert.equal(text, answer)
+  })
+}
+
 test('<sources> citations are stripped; a broken <tool_call> is reported and restated on the next reused turn', async () => {
   let calls = 0
   const f = await startFakeQuick({
