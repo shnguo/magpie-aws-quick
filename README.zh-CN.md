@@ -194,6 +194,9 @@ magpie login aws-quick              # 按提示选择登录方式
 
 ## 已知限制
 
+- **账号额度**。Quick 提示账号额度已用尽时，插件返回 HTTP 429。如果流式响应已经开始，
+  插件会在当前响应流中发送错误。两种情况下，插件都会查询额度恢复时间。冷却期间，
+  发往该账号的后续请求会立即收到 HTTP 429，Magpie 可以改用其他账号。
 - **工具调用是文本约定模拟**：Quick 的 agent 在服务端自带工具链（浏览器、本地文件、MCP 等），
   `tool_start`/`tool_result` 等事件由它自己执行、客户端只观测，`message_complete.tool_calls`
   恒为空。客户端传入的 OpenAI `tools` 通过提示词注入为 `<tool_call>{json}</tool_call>`

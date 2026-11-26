@@ -234,6 +234,11 @@ browser or in a private/incognito window, without signing out of the others.
 
 ## Known limitations
 
+- **Account quota.** If Quick reports that the account has reached its usage limit,
+  the plugin returns HTTP 429. If a stream has already started, it reports the
+  error in that stream. In both cases the plugin checks when the quota resets.
+  During the cooldown, later requests for that account get an immediate HTTP 429
+  so Magpie can try another account.
 - **Tool calls are a text-convention simulation**: Quick's agent owns a
   server-side toolchain (browser, local files, MCP, …); its `tool_start`/
   `tool_result` events are executed by Quick itself while clients only observe,
