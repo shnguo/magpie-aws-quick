@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import crypto from 'node:crypto'
-import { uploadImage } from '../lib/attach.mjs'
+import { uploadImage, uploadToolResults } from '../lib/attach.mjs'
 
 const PNG_B64 = Buffer.from('fake-png-bytes-12345').toString('base64')
 const RAW = Buffer.from(PNG_B64, 'base64')
@@ -39,6 +39,51 @@ function happyRoutes(over = {}) {
 const upload = (fetchImpl, extra = {}) => uploadImage({
   session: SESSION, image: { mimeType: 'image/png', data: PNG_B64 }, name: 'image-1.png', threadId: 'thread-1',
   fetchImpl, pollMs: 0, ...extra,
+})
+
+test('uploadToolResults delivers the exact UTF-8 bytes and returns a native file attachment', async () => {
+  const text = 'Résultats\n报告 🌱\n"done"\r\n'
+  const bytes = Buffer.from(text, 'utf8')
+  const name = 'tool-results-42.txt'
+  const path = '/sessions/thread-42/workspace/attached_files/' + name
+  const { fn, calls } = stubFetch(happyRoutes({
+    deliver: j({ eventResponse: { invokeAgentResponse: { status: 200, body: { path } } } }),
+  }))
+  const attachment = await uploadToolResults({
+    session: SESSION, text, name, threadId: 'thread-42', fetchImpl: fn, pollMs: 0,
+  })
+  const query = new URL(calls[0].url).searchParams
+  assert.equal(query.get('name'), name)
+  assert.equal(query.get('contentLength'), String(bytes.length))
+  assert.equal(query.get('contentType'), 'text/plain')
+  assert.deepEqual(calls[0].init.body, bytes)
+  assert.equal(JSON.parse(calls.at(-1).init.body).eventBody.invokeAgent.path, 'files/upload/thread-42')
+  assert.deepEqual(attachment, {
+    type: 'file', name, size: bytes.length, mimeType: 'text/plain', path, attachmentId: 'att-1',
+    contentSha256: crypto.createHash('sha256').update(bytes).digest('hex'),
+  })
+})
+
+test('uploadToolResults makes a denied DLP decision non-retryable and propagates scanner failures separately', async () => {
+  for (const [dlpJobStatus, policyAction, expectedStatus] of [
+    ['COMPLETED', 'BLOCK', 422], ['COMPLETED', 'WARN', 422], ['COMPLETED', undefined, 422], ['FAILED', undefined, undefined],
+  ]) {
+    const { fn, calls } = stubFetch(happyRoutes({ dlp: [j({ dlpJobStatus, policyAction })] }))
+    await assert.rejects(uploadToolResults({
+      session: SESSION, text: 'tool output', threadId: 'thread-42', fetchImpl: fn,
+    }), e => e.reason === 'dlp' && e.status === expectedStatus)
+    assert.equal(calls.length, 2)
+    assert.ok(calls[1].url.includes('attachment-dlp-status'))
+  }
+})
+
+test('uploadToolResults rejects more than 95 MiB of UTF-8 text before uploading', async () => {
+  const text = 'é'.repeat(95 * 1024 * 1024 / 2) + 'x'
+  const { fn, calls } = stubFetch([])
+  await assert.rejects(uploadToolResults({
+    session: SESSION, text, threadId: 'thread-42', fetchImpl: fn,
+  }), e => e.status === 413)
+  assert.equal(calls.length, 0)
 })
 
 test('uploadImage: upload → dlp poll → deliver returns a path attachment', async () => {

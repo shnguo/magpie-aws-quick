@@ -295,7 +295,12 @@ browser or in a private/incognito window, without signing out of the others.
   optional-tool turn reserves space for the call format and a tool name.
   A required choice reserves a callable argument outline and the full current
   question. If they cannot fit together, the adapter returns HTTP 413 before
-  sending that turn. Earlier history and tool results share the remaining space. Ordinary chat keeps full system
+  sending that turn. When rebuilding a thread after an account switch or an
+  expired thread, the adapter reserves room for the latest batch of tool
+  results, including their call labels. If the batch cannot fit inline, it
+  uploads the complete text to the new thread’s workspace. Quick can read
+  the attachment without repeating the client tools. Older history uses the
+  remaining space. Ordinary chat keeps full system
   instructions when they fit alongside the encoded turn. Oversized instructions retain
   their opening and closing text when space permits. Claude Code Auto permission reviews require the complete policy
   and transcript in one frame. An oversized review returns HTTP 413 before
