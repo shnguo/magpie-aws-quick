@@ -166,8 +166,15 @@ function makeSessions(opts) {
   return createSessionStore({ ttlMs, max, file: path.join(dir, 'thread-sessions.json') })
 }
 
-export const AwsQuickAuthPlugin = async (_input, options) => {
+export const AwsQuickAuthPlugin = async (input, options) => {
   const opts = options && typeof options === 'object' ? options : {}
+  const app = input?.client?.app
+  // Magpie adds the service prefix itself. Keep verbose OAuth and socket
+  // debug output on the explicitly supplied log callback.
+  const hostLog = typeof app?.log === 'function'
+    ? line => app.log({ body: { service: PROVIDER, level: 'info', message: line.replace(/^\[aws-quick\] /, '') } })
+    : undefined
+  const diagnosticLog = opts.log ?? hostLog
   const outpostMgr = createOutpostManager(opts)
   const sessions = makeSessions(opts)
   // The account's backend by sign-in method: OAuth and Credential Manager chat
@@ -389,7 +396,7 @@ export const AwsQuickAuthPlugin = async (_input, options) => {
         const auth = await getAuth()
         const b = backendFor(auth)
         if (!b) return {}
-        return { baseURL: BASE, apiKey: b.apiKey, fetch: makeFetch(b.mgr, { ...opts, identityKey: b.key }, sessions) }
+        return { baseURL: BASE, apiKey: b.apiKey, fetch: makeFetch(b.mgr, { ...opts, diagnosticLog, identityKey: b.key }, sessions) }
       },
       // magpie's own hook (OpenCode ignores it): agent-hour quota for the
       // account card and Usage page.

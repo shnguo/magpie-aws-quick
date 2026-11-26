@@ -45,6 +45,26 @@ test('standalone HTTP preserves instructions and user text split inside UTF-8 ch
   assert.equal(payload.text, user)
 })
 
+test('standalone HTTP writes usage diagnostics to stderr by default', async t => {
+  const { outpostMgr, sessions, fake } = await startChatFixture(t)
+  const stderr = t.mock.method(console, 'error', () => {})
+  const server = createProxyServer({ outpostMgr, sessions })
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  t.after(() => new Promise(resolve => server.close(resolve)))
+
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/v1/chat/completions`, {
+    method: 'POST',
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'standalone private text' }] }),
+  })
+  assert.equal(response.status, 200)
+  assert.equal((await response.json()).usage.prompt_tokens, 14)
+  const thread = fake.state.userMessages[0].threadId.slice(0, 8)
+  assert.deepEqual(stderr.mock.calls.map(call => call.arguments), [
+    [`[aws-quick] usage thread=${thread} reused=false prompt=14 cached=3 out=7 model=fake-resolved`],
+  ])
+})
+
 test('plugin fetch cancels a running Quick turn when the Request signal aborts', async t => {
   const ctrl = new AbortController()
   const { outpostMgr, sessions, fake } = await startChatFixture(t, {

@@ -19,6 +19,7 @@ import { createOutpostManager } from '../lib/outpost.mjs'
 import { createSessionStore, SESSION_DEFAULTS } from '../lib/sessions.mjs'
 
 export function createProxyServer({ options = {}, token = '', outpostMgr, sessions } = {}) {
+  const handlerOptions = { ...options, diagnosticLog: options.log ?? (line => console.error(line)) }
   return createServer(async (req, res) => {
     try {
       const url = new URL(req.url, 'http://local')
@@ -49,7 +50,7 @@ export function createProxyServer({ options = {}, token = '', outpostMgr, sessio
         }
         const effortHeader = req.headers['x-magpie-effort']
         out = await handleChatCompletions({
-          body, outpostMgr, options, signal: ac.signal, sessions,
+          body, outpostMgr, options: handlerOptions, signal: ac.signal, sessions,
           effortHeader: typeof effortHeader === 'string' ? effortHeader : undefined,
         })
       } else {

@@ -211,7 +211,8 @@ export async function startFakeQuick({ script, session, connectError, staleStop 
           const p = inner.payload || {}
           const threadId = p.thread_id || ''
           state.userMessages.push({ threadId, payload: p, at: Date.now() })
-          Promise.resolve(script ? script(p, { threadId }) : defaultScript(p)).then((events) => {
+          // send emits a raw session event without adding the active turn's thread ID.
+          Promise.resolve(script ? script(p, { threadId, send: event => sendEs(event) }) : defaultScript(p)).then((events) => {
             const list = Array.isArray(events) ? events : []
             for (const ev of list) sendEs(ev, threadId || ev.thread_id)
           }).catch(() => {})
