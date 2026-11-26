@@ -1,0 +1,17 @@
+# Upstream decision log
+
+This fork reviews changes from httpdone/magpie-aws-quick daily. The last upstream version merged in full was 0.1.9. Later features can reach the fork through individual backports, so the daily comparison starts at the last reviewed upstream commit. [0.1.9 merge into the fork](https://github.com/shnguo/magpie-aws-quick/commit/4dbfa5b90376a960cb2bc58385eca8d69628a0cc)
+
+**Last reviewed upstream commit** · [aa3b026 · version 0.1.11](https://github.com/httpdone/magpie-aws-quick/commit/aa3b0260deb89956a5d4d7e5e68777c7fa1b80c8) on 2026-11-25.
+
+Each entry names the feature, its upstream source, the decision date, the reason and any fork commit that implements it. A pending item can include a recommendation. When a decision changes, append a dated entry so the earlier reasoning remains available. For a deferred change, record what would justify another look.
+
+## 2026-11-25
+
+| Feature | Decision | Reason and evidence |
+| --- | --- | --- |
+| Windows multi-account credential discovery | Adopted | PowerShell 5.1 can wrap several credentials in an object, which made saved accounts appear to be missing. The fork now reads that format. A regression test covers the multi-account output. [Upstream change](https://github.com/httpdone/magpie-aws-quick/commit/024a3eb3595bc23bd35e70a7c3981d593ac8ee5f) · [Fork commit](https://github.com/shnguo/magpie-aws-quick/commit/ad5de80324d2f9d6310c371885b0bfd030205aa7) |
+| Quota detection and account cooldown | Adopted with changes | Quick can report exhaustion as ordinary assistant text. Recognizing it lets Magpie try another account. The fork also records the cooldown when the error arrives after streaming starts and skips the fresh-thread retry on the exhausted account. The quota paths have simulated WebSocket coverage. [Upstream detection](https://github.com/httpdone/magpie-aws-quick/commit/024a3eb3595bc23bd35e70a7c3981d593ac8ee5f) · [Upstream cooldown](https://github.com/httpdone/magpie-aws-quick/commit/d43926642506c2d5864b4853db962eea063966a1) · [Fork commit](https://github.com/shnguo/magpie-aws-quick/commit/d9a64abc387a79062f71e780e66f0134fdc776b0) |
+| Oversized Auto Mode permission reviews | Deferred | Upstream can omit part of the transcript and reuse a review thread based solely on the policy hash. The fork returns HTTP 413 when the full policy and transcript cannot fit. Reconsider when the reviewer can retain all evidence and isolate review threads by account and session. [Upstream implementation](https://github.com/httpdone/magpie-aws-quick/blob/12c7c309637541be8df482d5943380c5654550cb/lib/review.mjs) |
+| Eight concurrent requests per account | Deferred | Eight short Fast requests succeeded on one warmed WebSocket in a live test. In a cold-start fixture, eight simultaneous first requests opened eight sockets for the same account. Keep the limit at one until simultaneous starts share one socket. [Upstream change](https://github.com/httpdone/magpie-aws-quick/commit/12c7c309637541be8df482d5943380c5654550cb) |
+| Recover a tool call whose closing tag is missing | Pending | PR #17 is open. It would recover a call when the arguments contain complete JSON and the stream ends before the closing tag. Before deciding, check the fork’s handling of complete and partial arguments and verify that a recovered call is emitted only once. [Upstream PR](https://github.com/httpdone/magpie-aws-quick/pull/17) · [Reviewed revision](https://github.com/httpdone/magpie-aws-quick/commit/b5448530fb809b4b95d1f8d46f7e0a5585d29673) |

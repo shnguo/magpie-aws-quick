@@ -257,6 +257,8 @@ magpie login aws-quick              # 按提示选择登录方式
 
 ## 开发
 
+本分支对上游功能的取舍及原因见[上游决策记录](https://github.com/shnguo/magpie-aws-quick/blob/main/docs/upstream-decisions.md)。
+
 ```bash
 npm test          # node --test test/*.test.mjs（fake WS server，无需真账号）
 node _research/smoke-plugin.mjs fast   # 真实冒烟（需要本机 Quick 已登录）

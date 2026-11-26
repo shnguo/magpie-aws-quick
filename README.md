@@ -325,6 +325,8 @@ browser or in a private/incognito window, without signing out of the others.
 
 ## Development
 
+See the [upstream decision log](https://github.com/shnguo/magpie-aws-quick/blob/main/docs/upstream-decisions.md) for the features this fork reviewed and the reasons behind each decision.
+
 ```bash
 npm test          # node --test test/*.test.mjs (fake WS server, no real account)
 node _research/smoke-plugin.mjs fast   # live smoke (needs Quick signed in locally)
