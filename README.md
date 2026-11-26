@@ -102,9 +102,10 @@ is only used when both content tiers fail.
   ToolSearch, get their missing definitions incrementally. Removing a declared
   tool or changing its parameter contract starts a fresh thread. A forced
   choice limits the current turn and preserves the other tools' delivery records.
-- **Failure-safe** — a reused turn that errors or is cancelled (499, content
-  filter, idle timeout) puts its thread back, so the next request still
-  continues it.
+- **Interrupted turns** — once Quick shows that generation has started, a
+  failed turn can already be part of its server-side history. The adapter
+  drops that cached continuation so a caller retry rebuilds from the
+  conversation the client actually has.
 - **Edited and branched conversations** — strict matching preserves whitespace
   in user and tool messages. Compaction may rewrite older text and still match
   through the fallback rules above. Replacing a historical image or matching
@@ -113,9 +114,9 @@ is only used when both content tiers fail.
 - **Bounded memory** — entries expire after 24h idle (agent sessions pause
   far longer than that between turns) and the store is LRU-capped at 200
   threads. The cache persists to `thread-sessions.json` (hashes + thread
-  ids, outstanding call ids, schema hashes and tool delivery progress) so reuse survives plugin reloads; a stale hit is
-  safe — the handler retries once on a fresh thread with the full
-  transcript.
+  ids, outstanding call ids, schema hashes and tool delivery progress) so reuse
+  survives plugin reloads. If Quick explicitly reports a missing or expired
+  thread before generation starts, the adapter retries once on a fresh thread.
 
 ### Models: agent_mode, not model ids
 
@@ -215,7 +216,8 @@ A few plugin options tune request handling (`magpie plugin options aws-quick '{�
 - `idleTimeoutMs` (default `300000`): abort a turn that shows no Quick progress
   (real events; keepalives don't count) for this long — surfaces as a 503
   `timeout` error, and Quick gets its own `stop_generation` frame so the turn
-  doesn't keep running server-side. Client aborts are handled the same way.
+  doesn't keep running server-side. Aborting the request or cancelling the
+  response stream also stops the active Quick turn.
   `0` disables the watchdog.
 - `showQuickTools` (default `true`): surface Quick's built-in tool activity
   (`tool_start`) as `[Quick: <name>]` reasoning lines so long agentic turns
