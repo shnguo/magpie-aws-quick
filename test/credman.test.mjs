@@ -120,3 +120,23 @@ test('credman device id: the desktop profile\'s own device_id, else one stable g
     rmSync(store, { recursive: true, force: true })
   }
 })
+
+test('parseCredentialsOutput handles PS5.1 value-wrapped multi-credential output', async () => {
+  const { parseCredentialsOutput } = await import('../lib/wincred.mjs')
+  const entry = (target, rt) => ({ target, data: { refresh_token: rt, access_token: 'x' } })
+  // bare array (PS7 / single item shapes)
+  assert.equal(parseCredentialsOutput(JSON.stringify([entry('a', 'r1'), entry('b', 'r2')])).length, 2)
+  // PS5.1 multi-item envelope — the regression this fixes
+  const wrapped = JSON.stringify({ value: [entry('a', 'r1'), entry('b', 'r2')], Count: 2 })
+  const got = parseCredentialsOutput(wrapped)
+  assert.equal(got.length, 2)
+  assert.equal(got[0].target, 'a')
+  assert.equal(got[1].data.refresh_token, 'r2')
+  // single object (one credential)
+  assert.equal(parseCredentialsOutput(JSON.stringify(entry('solo', 'r3'))).length, 1)
+  // junk / empty / entries without refresh_token dropped
+  assert.equal(parseCredentialsOutput('').length, 0)
+  assert.equal(parseCredentialsOutput('[]').length, 0)
+  assert.equal(parseCredentialsOutput('not json').length, 0)
+  assert.equal(parseCredentialsOutput(JSON.stringify([{ target: 'c', data: {} }])).length, 0)
+})
