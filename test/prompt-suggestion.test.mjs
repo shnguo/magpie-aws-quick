@@ -45,7 +45,7 @@ const read = { type: 'function', function: {
 
 async function startPromptFixture(t, fakeOptions, callerAgent = 'claude-desktop') {
   const { fake, outpostMgr, sessions } = await startChatFixture(t, fakeOptions)
-  const quick = _internal.makeFetch(outpostMgr, {}, sessions)
+  const quick = _internal.makeFetch(outpostMgr, { identityKey: t.name }, sessions)
   const request = body => quick('http://127.0.0.1/v1/chat/completions', {
     method: 'POST',
     headers: { 'x-magpie-session': 'one-claude-code-chat', 'x-magpie-caller-agent': callerAgent },
@@ -111,7 +111,7 @@ test('a pending suggestion and its later completion leave successive foreground 
   const first = user('Remember the original thread.')
   const history = [first, await send(request, [first])]
   const parts = [{ type: 'text', text: suggestion }]
-  const pending = send(request, [...history, user(parts)])
+  const pending = request({ model: 'smart', messages: [...history, user(parts)], stream: true })
   try {
     await started.promise
     const next = user('Start the server.')
@@ -119,7 +119,9 @@ test('a pending suggestion and its later completion leave successive foreground 
   } finally {
     release.resolve()
   }
-  await pending
+  const suggestionResponse = await pending
+  assert.equal(suggestionResponse.status, 200)
+  assert.ok((await suggestionResponse.text()).includes('"content":"Preview the page."'))
   const last = user('Show its address.')
   await send(request, [...history, last])
   const [original, side, actual, after] = fake.state.userMessages
@@ -189,5 +191,76 @@ for (const [label, caller, prompt] of [
     const [initial, next] = fake.state.userMessages
     assert.equal(next.threadId, initial.threadId)
     assert.equal(next.payload.text, prompt)
+  })
+}
+
+const blocked = { type: 'guardrail_blocked', payload: { message: 'Fixture content check declined.' } }
+
+for (const stream of [false, true]) {
+  test('a declined ' + (stream ? 'streaming' : 'JSON') + ' suggestion leaves the foreground available', async t => {
+    const { request, fake } = await startPromptFixture(t, { script: p => p.text.endsWith(suggestion) ? [
+      { type: 'thinking_delta', payload: { delta: 'Partial reasoning' } },
+      { type: 'text_delta', payload: { delta: 'Partial suggestion' } },
+      { type: 'text_delta', payload: { delta: '<tool_call>{"name":"read_page","arguments":{"file":"draft"}}</tool_call>' } },
+      { type: 'tool_arguments', payload: { tool_id: 'draft-read', tool_name: 'read_page', arguments: { file: 'draft' } } },
+      { type: 'turn_usage', payload: { input_tokens: 13, output_tokens: 7 } },
+      blocked,
+    ] : complete('Noted.') })
+    const first = user('Remember my page.')
+    const history = [first, await send(request, [first], [read])]
+    const res = await request({
+      model: 'smart', messages: [...history, user(suggestion)], tools: [read], stream,
+      stream_options: { include_usage: true },
+    })
+    assert.equal(res.status, 200)
+    const usage = { prompt_tokens: 13, completion_tokens: 7, total_tokens: 20 }
+    if (stream) {
+      const frames = (await res.text()).split('\n\n').filter(Boolean).map(frame => frame.slice('data: '.length))
+      assert.equal(frames.pop(), '[DONE]')
+      const chunks = frames.map(frame => JSON.parse(frame))
+      for (const chunk of chunks) {
+        assert.equal(chunk.error, undefined)
+        for (const { delta } of chunk.choices) {
+          assert.equal(delta.content || '', '')
+          assert.equal(delta.reasoning_content, undefined)
+          assert.equal(delta.tool_calls, undefined)
+        }
+      }
+      const finishes = chunks.flatMap(chunk => chunk.choices.map(choice => choice.finish_reason)).filter(Boolean)
+      assert.deepEqual(finishes, ['stop'])
+      assert.deepEqual(chunks.at(-1).usage, usage)
+    } else {
+      const body = await res.json()
+      const [choice] = body.choices
+      assert.equal(choice.finish_reason, 'stop')
+      assert.deepEqual(choice.message, { role: 'assistant', content: '' })
+      assert.deepEqual(body.usage, usage)
+    }
+    const next = user('Continue the page.')
+    await send(request, [...history, next], [read])
+    const turns = fake.state.userMessages
+    assert.equal(turns.length, 3)
+    assert.notEqual(turns[1].threadId, turns[0].threadId)
+    assert.equal(turns[2].threadId, turns[0].threadId)
+    assert.ok(turns[2].payload.text.endsWith(next.content))
+    assert.ok(!turns[2].payload.text.includes(first.content) && !turns[2].payload.text.includes(heading))
+  })
+}
+
+for (const [name, prompt, event, status] of [
+  ['foreground content check', 'Check my page.', blocked, 502],
+  ['suggestion transport error', suggestion, { type: 'error', payload: { message: 'Fixture transport error.' } }, 502],
+  ['suggestion quota error', suggestion, { type: 'guardrail_blocked', payload: { code: 'usage_limit' } }, 429],
+]) {
+  test(name + ' is reported to the caller', async t => {
+    const { request, fake } = await startPromptFixture(t, { script: () => [event] })
+    const res = await request({ model: 'smart', messages: [user(prompt)] })
+    assert.equal(res.status, status)
+    assert.ok((await res.json()).error.message)
+    if (status === 429) {
+      const followup = await request({ model: 'smart', messages: [user('Continue the page.')] })
+      assert.equal(followup.status, 429)
+    }
+    assert.equal(fake.state.userMessages.length, 1)
   })
 }

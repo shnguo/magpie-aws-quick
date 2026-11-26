@@ -104,7 +104,10 @@ is only used when both content tiers fail.
   choice limits the current turn and preserves the other tools' delivery records.
 - **Claude Code prompt suggestions** run on a separate Quick thread with
   a bounded replay of recent history. The next user message can continue
-  on the original thread even while Claude is generating a suggestion.
+  on the original thread even while Claude is generating a suggestion. If
+  Quick's content check declines the suggestion, the adapter returns an
+  empty suggestion. On the direct AWS Quick route the account stays
+  available for the next message.
 - **Interrupted turns** — once Quick shows that generation has started, a
   failed turn can already be part of its server-side history. The adapter
   drops that cached continuation so a caller retry rebuilds from the
