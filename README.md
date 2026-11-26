@@ -297,8 +297,9 @@ browser or in a private/incognito window, without signing out of the others.
   question. If they cannot fit together, the adapter returns HTTP 413 before
   sending that turn. When rebuilding a thread after an account switch or an
   expired thread, the adapter reserves room for the latest batch of tool
-  results, including their call labels. If the batch cannot fit inline, it
-  uploads the complete text to the new thread’s workspace. Quick can read
+  results and the arguments that produced each one. A long follow-up can keep
+  a small result inline. When a larger batch needs an attachment, the adapter
+  uploads the calls and results together to the new thread’s workspace. Quick can read
   the attachment without repeating the client tools. Older history uses the
   remaining space. Ordinary chat keeps full system
   instructions when they fit alongside the encoded turn. Oversized instructions retain
