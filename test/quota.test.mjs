@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { startChatFixture } from './helpers/chat-fixture.mjs'
 import { defaultScript } from './helpers/fake-quick.mjs'
+import { markQuotaExhausted } from '../lib/usage.mjs'
 
 const sentence = "You've reached your usage limit. Check your profile for details."
 const prompt = { role: 'user', content: 'hello' }
@@ -115,4 +116,43 @@ test('a long whitespace delta reaches the stream immediately and an ordinary err
   assert.match(stream, /api_error/)
   const next = await request({ ...body, messages: [{ role: 'user', content: 'next' }] }, options)
   assert.equal((await next.json()).choices[0].message.content, 'echo:next')
+})
+
+for (const [bucket, seconds, span] of [
+  ['session', 295, '5m'],
+  ['session', 7624, '2h 8m'],
+  ['monthly', 10 * 86400, '240h 0m'],
+]) {
+  test(bucket + ' reset in ' + span + ' is usable by HTTP clients and Magpie routing', async t => {
+    const now = 1_790_000_000_000
+    t.mock.method(Date, 'now', () => now)
+    const { request, outpostMgr } = await startChatFixture(t)
+    const ensure = t.mock.method(outpostMgr, 'ensure')
+    const reset = now / 1000 + seconds
+    const buckets = { [bucket]: { used: 50, limit: 50, resets_at: reset } }
+    const getSession = async () => ({ id_token: 'fixture', tenant_url: 'https://fixture.invalid' })
+    await markQuotaExhausted(t.name, getSession, async () => Response.json({
+      eventResponse: { invokeAgentResponse: { status: 200, body: buckets } },
+    }))
+    const result = await request(body, { identity: t.name })
+    assert.equal(result.status, 429)
+    assert.equal(result.headers.get('retry-after'), String(seconds))
+    const { error } = await result.json()
+    assert.equal(error.type, 'rate_limit_error')
+    assert.equal(error.resets_at, reset)
+    assert.ok(error.message.includes(bucket + ' quota resets in ' + span))
+    assert.equal(ensure.mock.callCount(), 0)
+  })
+}
+
+test('a fresh refusal and an unresolved cooldown carry no claimed upstream reset', async t => {
+  const { request } = await startChatFixture(t, { script: () => [limit] })
+  for (let i = 0; i < 2; i++) {
+    const res = await request(body, { identity: t.name })
+    assert.equal(res.status, 429)
+    assert.equal(res.headers.get('retry-after'), null)
+    const { error } = await res.json()
+    assert.equal(error.resets_at, undefined)
+    assert.doesNotMatch(error.message, /resets in /i)
+  }
 })

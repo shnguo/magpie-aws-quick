@@ -58,7 +58,7 @@ test('findContinuation matches an extended conversation', () => {
   assert.deepEqual(cont.delta, [{ role: 'user', content: 'what now' }])
 })
 
-test('findContinuation rejects edited history and assistant deltas', () => {
+test('findContinuation rejects edited history and keeps intervening text replies after an exact prefix', () => {
   const store = createSessionStore()
   const convo1 = [{ role: 'user', content: 'hi' }]
   const h1 = chainHashes(scope, convo1)
@@ -72,17 +72,14 @@ test('findContinuation rejects edited history and assistant deltas', () => {
   ]
   assert.equal(findContinuation(store, chainHashes(scope, edited), edited), undefined)
 
-  // delta containing an assistant message → rejected (can't append mid-turn)
-  const weird = [
+  const withForeignReply = [
     { role: 'user', content: 'hi' },
     { role: 'assistant', content: 'hello' },
     { role: 'assistant', content: 'another' },
     { role: 'user', content: 'next' },
   ]
-  // findContinuation scans i where convo[i-1] is assistant; the only stored key
-  // is after 'hello' — at i=2 convo[1] is assistant but delta=[assistant,user]
-  // contains assistant → rejected. A later i has no stored key.
-  assert.equal(findContinuation(store, chainHashes(scope, weird), weird), undefined)
+  const match = findContinuation(store, chainHashes(scope, withForeignReply), withForeignReply)
+  assert.deepEqual(match.delta, withForeignReply.slice(2))
 })
 
 test('store TTL and LRU eviction', () => {

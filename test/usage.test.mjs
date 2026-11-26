@@ -34,6 +34,7 @@ test('entitlements map to one agent-hours window per pool, plan and trial expiry
 test('quickUsage posts the qbs-event and reads the account from the actor ARN', async () => {
   let seen
   const fetchImpl = async (url, init) => {
+    if (JSON.parse(init.body).eventType === 'invokeAgent') return new Response(null, { status: 404 })
     seen = { url, init }
     return new Response(JSON.stringify({ errorMessage: null, eventResponse: { getAvailableEntitlementUnitsResponse: RESP } }), { status: 200 })
   }
@@ -73,6 +74,93 @@ test('profile usage reads session and monthly quotas from the Quick invokeAgent 
   assert.equal(result.session.resumeInMinutes, 42)
   assert.equal(result.monthly.exhausted, false)
   assert.equal(result.monthly.resetsAt, new Date(monthlyReset * 1000).toISOString())
+})
+
+test('the account card merges session minutes and the matching monthly reset', async t => {
+  const now = Date.UTC(2026, 10, 15)
+  t.mock.method(Date, 'now', () => now)
+  const sessionReset = now / 1000 + 5000
+  const monthlyReset = now / 1000 + 12 * 86400
+  const entitlements = [...RESP.entitlements].reverse()
+  entitlements.push({ unitType: 'SEPARATE_HOUR_UNIT', numMinsAvailable: 90, numMinsProvisioned: 150 })
+  const fetchImpl = async (_url, init) => {
+    if (JSON.parse(init.body).eventType === 'getAvailableEntitlementUnits') {
+      return Response.json({ eventResponse: { getAvailableEntitlementUnitsResponse: { ...RESP, entitlements } } })
+    }
+    return Response.json({ eventResponse: { invokeAgentResponse: { status: 200, body: {
+      session: { used: 99, limit: 100, resets_at: sessionReset, resume_in_minutes: 5 },
+      monthly: { resets_at: monthlyReset },
+    } } } })
+  }
+  const getSession = async () => ({ tenant_url: 'https://tenant.example', id_token: 'test-token' })
+  const card = await quickUsage(getSession, { fetchImpl })
+  assert.deepEqual(card.windows[0], {
+    name: 'Session (5h window)', used: 99, amount: 99, limit: 100, unit: 'min',
+    resetsAt: new Date(sessionReset * 1000).toISOString(),
+  })
+  assert.equal(card.windows.length, 3)
+  assert.equal(card.windows[1].resetsAt, new Date(monthlyReset * 1000).toISOString())
+  assert.equal(card.windows[2].resetsAt, new Date(2026, 11, 1).toISOString())
+})
+
+test('the session window has a finite reset when full and omits incomplete counters', () => {
+  const now = new Date(2026, 10, 15)
+  function windows(bucket) {
+    return usageFromEntitlements(RESP, { now, profile: { session: bucket } }).windows
+  }
+  const full = { used: 65, limit: 60, exhausted: true }
+  const resume = windows({ ...full, resumeInMinutes: 42 })[0]
+  assert.equal(resume.used, 100)
+  assert.equal(resume.amount, 65)
+  assert.equal(Date.parse(resume.resetsAt) - now, 42 * 60_000)
+  assert.equal(Date.parse(windows(full)[0].resetsAt) - now, 30 * 60_000)
+  assert.equal(windows({ used: 0, limit: 60 })[0].resetsAt, undefined)
+  assert.equal(windows({ used: null, limit: 60 }).length, 1)
+  assert.equal(windows({ used: 0, limit: null }).length, 1)
+})
+
+for (const stage of ['fetch', 'json']) {
+  test('a profile ' + stage + ' ignoring cancellation still returns the entitlement card at its deadline', async t => {
+    const deadline = new AbortController()
+    t.mock.method(AbortSignal, 'timeout', ms => {
+      assert.equal(ms, 3000)
+      return deadline.signal
+    })
+    const parent = new AbortController()
+    const attempted = Promise.withResolvers()
+    const stuck = Promise.withResolvers()
+    let seenSignal
+    const fetchImpl = async (_url, init) => {
+      if (JSON.parse(init.body).eventType === 'getAvailableEntitlementUnits') {
+        return Response.json({ eventResponse: { getAvailableEntitlementUnitsResponse: RESP } })
+      }
+      seenSignal = init.signal
+      const hang = () => { attempted.resolve(); return stuck.promise }
+      return stage === 'fetch' ? hang() : { status: 200, ok: true, json: hang }
+    }
+    const card = quickUsage(async () => ({ tenant_url: 'https://tenant.example', id_token: 'test-token' }), {
+      signal: parent.signal, fetchImpl,
+    })
+    await attempted.promise
+    deadline.abort()
+    const result = await card
+    assert.equal(parent.signal.aborted, false)
+    assert.equal(seenSignal.aborted, true)
+    assert.deepEqual(result.windows.map(w => w.name), ['Agent hours'])
+    stuck.resolve(null)
+  })
+}
+
+test('profile lookup respects a parent cancellation even while getSession is stuck', async () => {
+  const parent = new AbortController()
+  const stuck = Promise.withResolvers()
+  let reads = 0
+  const profile = profileUsage(() => stuck.promise, { signal: parent.signal, fetchImpl: () => { reads++ } })
+  parent.abort()
+  assert.ok((await profile).error)
+  stuck.resolve({ tenant_url: 'https://tenant.example', id_token: 'test-token' })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(reads, 0)
 })
 
 test('simultaneous quota failures share a probe and the cooldown expires at the session resume time', async t => {

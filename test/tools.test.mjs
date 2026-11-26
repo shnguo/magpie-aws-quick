@@ -367,6 +367,47 @@ test('parser drops unterminated block without leaking it', () => {
   assert.equal(end.dropped, 'unterminated')
 })
 
+test('clean EOF emits a complete call once at every cut in the closing tag', () => {
+  const close = '</tool_call>'
+  const args = { nested: [{ text: 'literal </tool_call>, <tool_call>, quote " and slash \\' }] }
+  const json = JSON.stringify({ name: 'Read', arguments: args })
+  for (let cut = 0; cut <= close.length; cut++) {
+    const parser = createToolCallParser()
+    const chunks = Array.from('prefix <tool_call>{"name":"first"}' + close + '<tool_call>' + json + ' ' + close.slice(0, cut))
+    const results = chunks.map(chunk => parser.push(chunk))
+    assert.equal(results.flatMap(r => r.calls).length, cut === close.length ? 2 : 1)
+    const end = parser.end()
+    const expected = [{ name: 'first', arguments: {} }, { name: 'Read', arguments: args }]
+    assert.equal(end.dropped, undefined)
+    assert.equal(results.map(r => r.text).join('') + end.text, 'prefix ')
+    assert.deepEqual([...results.flatMap(r => r.calls), ...end.calls], expected)
+    assert.deepEqual(parser.end().calls, [])
+    assert.deepEqual(parser.calls, expected)
+  }
+})
+
+test('clean EOF rejects incomplete or malformed calls and invalid argument values', () => {
+  for (const block of [
+    '{"name":"Read","arguments":{"path":"partial',
+    '{"name":"Read","arguments":{"path":"done"}',
+    '{"name":"Read","arguments":"{bad}"}',
+    '{"name":"Read","arguments":null}',
+    '{"name":"Read","arguments":[]}',
+    '{"name":"Read","arguments":"false"}',
+    '{"arguments":{}}',
+    '{"name":"Read"}{"name":"second"}',
+    '{"name":"Read"} garbage',
+    '{"name":"Read"}</tool_other',
+  ]) {
+    const parser = createToolCallParser()
+    assert.deepEqual(parser.push('<tool_call>' + block).calls, [])
+    const end = parser.end()
+    assert.equal(end.dropped, 'unterminated', block)
+    assert.equal(end.text, '')
+    assert.deepEqual(end.calls, [], block)
+  }
+})
+
 test('parser tolerates arguments as JSON string and missing args', () => {
   const p = createToolCallParser()
   const r = p.push('<tool_call>{"name":"f","arguments":"{\\"a\\":1}"}</tool_call><tool_call>{"name":"g"}</tool_call>')

@@ -204,12 +204,11 @@ See the file header for options (`PROXY_TOKEN` auth recommended).
 
 ### Usage on the account card
 
-The plugin implements magpie's `auth.usage` hook, so the account card and the
-**Usage** page show the account's Quick quota: agent hours used of the plan's
-allowance, the plan name (e.g. *Quick Lite (free trial)*) and the trial's
-expiry. It reads `getAvailableEntitlementUnits` from the tenant data plane
-with the account's own token — the same numbers as the desktop app's usage
-widget, which also assumes the allowance resets on the 1st of next month.
+The account card and Usage page show monthly agent hours, plan and trial expiry.
+When Quick supplies session counters, the card also shows minutes used in the
+rolling five-hour window. The card uses Quick’s reset time for the matching
+monthly pool. If the profile lookup is unavailable, the card still shows the
+entitlements and estimates the monthly reset at the start of the next month.
 
 ### Options
 
@@ -245,8 +244,10 @@ browser or in a private/incognito window, without signing out of the others.
 - **Account quota.** If Quick reports that the account has reached its usage limit,
   the plugin returns HTTP 429. If a stream has already started, it reports the
   error in that stream. In both cases the plugin checks when the quota resets.
-  During the cooldown, later requests for that account get an immediate HTTP 429
-  so Magpie can try another account.
+  During cooldown, incoming requests periodically recheck Quick’s session and
+  monthly usage. A recovered account can serve the waiting request. For a
+  server-reported reset, the cooldown response includes Retry-After in seconds
+  and the reset timestamp so Magpie can schedule the next attempt.
 - **Tool calls are a text-convention simulation**: Quick's agent owns a
   server-side toolchain (browser, local files, MCP, …); its `tool_start`/
   `tool_result` events are executed by Quick itself while clients only observe,
@@ -266,6 +267,8 @@ browser or in a private/incognito window, without signing out of the others.
   schemas, Magpie adds a note to the reply with the counts. For explicit JSON
   output, the note goes in the reasoning field so the document stays parseable.
   Inline and fenced Markdown examples of tool calls pass through as text.
+  At the end of a completed response, the adapter can recover a valid JSON
+  tool call if its closing tag was cut short.
   A required choice produces an error if Quick completes without the requested
   client call. If Quick invokes a client-declared tool through Quick's own native tool channel, the plugin recognizes the call and
   emits it as a normal `tool_calls` item, stopping the turn before Quick can
@@ -284,8 +287,10 @@ browser or in a private/incognito window, without signing out of the others.
   `id_token` / `ws_host`, which is all the upload flow needs (verified live).
 - **Sampling params**: `temperature` etc. don't exist in the protocol and are
   ignored server-side (`capabilities.temperature:false`).
-- **Sessions are account-bound**: the thread-reuse scope includes an account
-  identity hash; switching accounts transparently invalidates old threads.
+- **Sessions are account-bound.** When a chat returns to an account, an exact
+  history match allows its thread to receive the intervening text conversation.
+  Intervening tool exchanges or images use fresh-thread replay so their
+  arguments, results and attachments travel together.
 - **Concurrency**: different threads can run turns in parallel on one
   QuickSocket; concurrent requests on the same thread are rejected (`busy`).
 - **OAuth sign-in is consumer/social only**: it replays the desktop app's
