@@ -50,7 +50,8 @@ export function createProxyServer({ options = {}, token = '', outpostMgr, sessio
         }
         const effortHeader = req.headers['x-magpie-effort']
         out = await handleChatCompletions({
-          body, outpostMgr, options: handlerOptions, signal: ac.signal, sessions,
+          body, outpostMgr, signal: ac.signal, sessions,
+          options: { ...handlerOptions, callerAgent: req.headers['x-magpie-caller-agent'] },
           effortHeader: typeof effortHeader === 'string' ? effortHeader : undefined,
         })
       } else {

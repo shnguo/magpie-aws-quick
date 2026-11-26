@@ -148,7 +148,7 @@ function makeFetch(outpostMgr, opts, sessions) {
       body,
       outpostMgr,
       sessions,
-      options: { ...opts, identity, sessionKey },
+      options: { ...opts, identity, sessionKey, callerAgent: headerOf(input, init, 'x-magpie-caller-agent') },
       effortHeader: headerOf(input, init, 'x-magpie-effort'),
       signal: init?.signal ?? (input instanceof Request ? input.signal : undefined),
     })
