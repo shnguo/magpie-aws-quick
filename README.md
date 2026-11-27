@@ -308,7 +308,12 @@ browser or in a private/incognito window, without signing out of the others.
   optional-tool turn reserves space for the call format and a tool name.
   A required choice reserves a callable argument outline and the full current
   question. If they cannot fit together, the adapter returns HTTP 413 before
-  sending that turn. When rebuilding a thread after an account switch or an
+  sending that turn. On a reused thread, current tool results share the space
+  left after the question and call labels. An individual result can exceed
+  16 KiB when it fits. If the adapter shortens the context it sends to Quick,
+  it reports the change in
+  `reasoning_content` for both streaming and buffered responses.
+  When rebuilding a thread after an account switch or an
   expired thread, the adapter reserves room for the latest batch of tool
   results and the arguments that produced each one. A long follow-up can keep
   a small result inline. When a larger batch needs an attachment, the adapter
